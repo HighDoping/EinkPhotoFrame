@@ -2,154 +2,104 @@ package main
 
 import (
 	"fmt"
-	"image"
 	"image/color"
-	"image/png"
-    _ "image/jpeg"
-	"os"
+	"log"
 
 	"github.com/makeworld-the-better-one/dither/v2"
 )
 
-// resizeImage resizes the given image to the specified width and height.
-func resizeImage(img image.Image, width, height int, mode ...string) image.Image {
-    resizeMode := "fit" // Default mode
-    if len(mode) > 0 {
-        resizeMode = mode[0]
-    }
 
-    srcWidth := img.Bounds().Dx()
-    srcHeight := img.Bounds().Dy()
-    srcAspect := float64(srcWidth) / float64(srcHeight)
-    dstAspect := float64(width) / float64(height)
+func main() {
 
-    var newImg *image.RGBA
-    var scaleX, scaleY float64
-    var offsetX, offsetY int
-
-    switch resizeMode {
-    case "fill": // Fill the target dimensions, may change aspect ratio
-        newImg = image.NewRGBA(image.Rect(0, 0, width, height))
-        scaleX = float64(srcWidth) / float64(width)
-        scaleY = float64(srcHeight) / float64(height)
-
-    case "fit": // Maintain aspect ratio, fit within target dimensions
-        if srcAspect > dstAspect {
-            // Source is wider, fit to width
-            newHeight := int(float64(width) / srcAspect)
-            newImg = image.NewRGBA(image.Rect(0, 0, width, newHeight))
-            scaleX = float64(srcWidth) / float64(width)
-            scaleY = float64(srcHeight) / float64(newHeight)
-            height = newHeight
-        } else {
-            // Source is taller, fit to height
-            newWidth := int(float64(height) * srcAspect)
-            newImg = image.NewRGBA(image.Rect(0, 0, newWidth, height))
-            scaleX = float64(srcWidth) / float64(newWidth)
-            scaleY = float64(srcHeight) / float64(height)
-            width = newWidth
-        }
-
-    case "cut": // Maintain aspect ratio, cut/crop to target dimensions
-        newImg = image.NewRGBA(image.Rect(0, 0, width, height))
-        if srcAspect > dstAspect {
-            // Source is wider, cut sides
-            scaleY = float64(srcHeight) / float64(height)
-            scaleX = scaleY
-            // Center horizontally
-            offsetX = int((float64(srcWidth) - float64(width)*scaleX) / 2)
-        } else {
-            // Source is taller, cut top/bottom
-            scaleX = float64(srcWidth) / float64(width)
-            scaleY = scaleX
-            // Center vertically
-            offsetY = int((float64(srcHeight) - float64(height)*scaleY) / 2)
-        }
-
-    default: // "stretch" or any other value - stretch to fill target dimensions
-        newImg = image.NewRGBA(image.Rect(0, 0, width, height))
-        scaleX = float64(srcWidth) / float64(width)
-        scaleY = float64(srcHeight) / float64(height)
-    }
-
-    // Loop through each pixel in the new image
-    for y := 0; y < height; y++ {
-        for x := 0; x < width; x++ {
-            // Calculate the corresponding pixel in the original image
-            origX := int(float64(x) * scaleX) + offsetX
-            origY := int(float64(y) * scaleY) + offsetY
-
-            // Get the color from the original image
-            c := img.At(origX, origY)
-
-            // Set the color in the new image
-            newImg.Set(x, y, c)
-        }
-    }
-
-    return newImg
-}
-
-func main(){
-// Replace with your actual image path
-imagePath := "../asset/example.jpg"
-
-// Open the image file
-file, err := os.Open(imagePath)
+// Load the image from a file
+img, err := loadImage("../asset/example.jpg")
 if err != nil {
-    fmt.Println("Error opening image:", err)
-    return
-}
-defer file.Close()
-
-// Decode the image
-img, _, err := image.Decode(file)
-if err != nil {
-    fmt.Println("Error decoding image:", err)
+    log.Println("Error loading image:", err)
     return
 }
 
 //resize the image to 800x480
-img = resizeImage(img, 800, 480)
+img = resizeImage(img, 800, 480,"Lanczos", "fill_black")
 
-// These are the colors we want in our output image
-// palette_1 := []color.Color{
-//     color.RGBA{0, 0, 0, 255},   // Black
-//     color.RGBA{255, 255, 255, 255}, // White
-//     color.RGBA{0, 0, 255, 255}, // Blue
-//     color.RGBA{0, 255, 0, 255}, // Green
-//     color.RGBA{255, 0, 0, 255}, // Red
-//     color.RGBA{255, 255, 0, 255}, // Yellow
-//     color.RGBA{255, 165, 0, 255}, // Orange
-// }
-palette_2 := []color.Color{
-    color.RGBA{49, 40, 56, 255},   // Dark state (DS)
-    color.RGBA{174, 173, 168, 255}, // White state (WS)
-    color.RGBA{57, 63, 104, 255},   // Blue state (BS)
-    color.RGBA{48, 101, 68, 255},   // Green state (GS)
-    color.RGBA{146, 61, 62, 255},   // Red state (RS)
-    color.RGBA{173, 160, 73, 255},   // Yellow state (YS)
-    color.RGBA{160, 83, 65, 255},   // Orange state (OS)
+// Define available palettes
+palettes := map[string][]color.Color{
+    "standard": {
+        color.RGBA{0, 0, 0, 255},      // Black
+        color.RGBA{255, 255, 255, 255}, // White
+        color.RGBA{0, 0, 255, 255},     // Blue
+        color.RGBA{0, 255, 0, 255},     // Green
+        color.RGBA{255, 0, 0, 255},     // Red
+        color.RGBA{255, 255, 0, 255},   // Yellow
+        color.RGBA{255, 165, 0, 255},   // Orange
+    },
+    "eink": {
+        color.RGBA{49, 40, 56, 255},    // Dark state (DS)
+        color.RGBA{174, 173, 168, 255}, // White state (WS)
+        color.RGBA{57, 63, 104, 255},   // Blue state (BS)
+        color.RGBA{48, 101, 68, 255},   // Green state (GS)
+        color.RGBA{146, 61, 62, 255},   // Red state (RS)
+        color.RGBA{173, 160, 73, 255},  // Yellow state (YS)
+        color.RGBA{160, 83, 65, 255},   // Orange state (OS)
+    },
 }
 
-// Create ditherer
-d := dither.NewDitherer(palette_2)
-d.Matrix = dither.Stucki
+//define available dither algorithms
+//https://pkg.go.dev/github.com/makeworld-the-better-one/dither/v2
+error_dither_algo := map[string]dither. ErrorDiffusionMatrix{
+    "Atkinson": dither.Atkinson,
+    "Burkes": dither.Burkes,    
+    "FalseFloydSteinberg": dither.FalseFloydSteinberg,
+    "FloydSteinberg": dither.FloydSteinberg,    
+    "JarvisJudiceNinke": dither.JarvisJudiceNinke,
+    "Sierra": dither.Sierra,
+    "Sierra2": dither.Sierra2,
+    "Sierra2_4A": dither.Sierra2_4A,
+    "Sierra3": dither.Sierra3,
+    "SierraLite": dither.SierraLite,
+    "Simple2D": dither.Simple2D,
+    "StevenPigeon": dither.StevenPigeon,
+    "Stucki": dither.Stucki,
+    "TwoRowSierra": dither.TwoRowSierra}
 
-// Dither the image, attempting to modify the existing image
-// If it can't then a dithered copy will be returned.
+ordered_dither_algo := map[string]dither.OrderedDitherMatrix{
+    "ClusteredDot4x4": dither.ClusteredDot4x4,
+    "ClusteredDot6x6": dither.ClusteredDot6x6,
+    "ClusteredDot6x6_2": dither.ClusteredDot6x6_2,
+    "ClusteredDot6x6_3": dither.ClusteredDot6x6_3,
+    "ClusteredDot8x8": dither.ClusteredDot8x8,
+    "ClusteredDotDiagonal16x16": dither.ClusteredDotDiagonal16x16,
+    "ClusteredDotDiagonal6x6": dither.ClusteredDotDiagonal6x6,
+    "ClusteredDotDiagonal8x8": dither.ClusteredDotDiagonal8x8,
+    "ClusteredDotDiagonal8x8_2": dither.ClusteredDotDiagonal8x8_2,
+    "ClusteredDotDiagonal8x8_3": dither.ClusteredDotDiagonal8x8_3,
+    "ClusteredDotHorizontalLine": dither.ClusteredDotHorizontalLine,
+    "ClusteredDotSpiral5x5": dither.ClusteredDotSpiral5x5,
+    "ClusteredDotVerticalLine": dither.ClusteredDotVerticalLine,
+    "Horizontal3x5": dither.Horizontal3x5,
+    "Vertical5x3": dither.Vertical5x3,
+}
+
+selectedPalette := "standard"
+selectedDitherAlgorithm := "FloydSteinberg"
+
+strength := float32(1.0)
+
+d := dither.NewDitherer(palettes[selectedPalette])
+d.Serpentine = true
+
+if _, ok := error_dither_algo[selectedDitherAlgorithm]; ok {
+    d.Matrix = dither.ErrorDiffusionStrength(error_dither_algo[selectedDitherAlgorithm],strength)
+} else if _, ok := ordered_dither_algo[selectedDitherAlgorithm]; ok {
+    d.Mapper = dither.PixelMapperFromMatrix(ordered_dither_algo[selectedDitherAlgorithm],strength)
+}
+
 img = d.Dither(img)
 
 // Save the dithered image to a new file
-outputPath := "./dithered_image.png"
-outFile, err := os.Create(outputPath)
-if err != nil {
-    fmt.Println("Error creating output file:", err)
+outputPath := fmt.Sprintf("dithered_%s_%s.png", selectedPalette, selectedDitherAlgorithm)
+if err := saveImage(img, outputPath); err != nil {
+    log.Println("Error saving image:", err)
     return
 }
-defer outFile.Close()
-// Encode the dithered image to PNG format
-if err := png.Encode(outFile, img); err != nil {
-    fmt.Println("Error encoding dithered image:", err)
-    return
-}}
+
+log.Println("Dithered image saved to", outputPath)}

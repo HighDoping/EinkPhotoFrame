@@ -2,38 +2,13 @@ package main
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"log"
-    "os"
-    "path/filepath"
-    "strings"
 
 	"github.com/makeworld-the-better-one/dither/v2"
 )
-
-func generateFileList(folder string,file_ext []string) ([]string, error) {
-    files, err := os.ReadDir(folder)
-    if err != nil {
-        return nil, err
-    }
-    var fileList []string
-    for _, file := range files {
-        if !file.IsDir() {
-            for _, ext := range file_ext {
-                if strings.HasSuffix(file.Name(), ext) {
-                    fileList = append(fileList, filepath.Join(folder, file.Name()))
-                    break
-                }
-            }
-        }
-    }
-    return fileList, nil
-}
-
-func main() {
-
-    // Define available palettes
-palettes := map[string][]color.Color{
+var palettes = map[string][]color.Color{
     "7Standard": {
         color.RGBA{0, 0, 0, 255},      // Black
         color.RGBA{255, 255, 255, 255}, // White
@@ -56,7 +31,7 @@ palettes := map[string][]color.Color{
 
 //define available dither algorithms
 //https://pkg.go.dev/github.com/makeworld-the-better-one/dither/v2
-error_dither_algo := map[string]dither. ErrorDiffusionMatrix{
+var error_dither_algo = map[string]dither. ErrorDiffusionMatrix{
     "Atkinson": dither.Atkinson,
     "Burkes": dither.Burkes,    
     "FalseFloydSteinberg": dither.FalseFloydSteinberg,
@@ -72,7 +47,7 @@ error_dither_algo := map[string]dither. ErrorDiffusionMatrix{
     "Stucki": dither.Stucki,
     "TwoRowSierra": dither.TwoRowSierra}
 
-ordered_dither_algo := map[string]dither.OrderedDitherMatrix{
+var ordered_dither_algo = map[string]dither.OrderedDitherMatrix{
     "ClusteredDot4x4": dither.ClusteredDot4x4,
     "ClusteredDot6x6": dither.ClusteredDot6x6,
     "ClusteredDot6x6_2": dither.ClusteredDot6x6_2,
@@ -89,54 +64,104 @@ ordered_dither_algo := map[string]dither.OrderedDitherMatrix{
     "Horizontal3x5": dither.Horizontal3x5,
     "Vertical5x3": dither.Vertical5x3,
 }
-for palette,_ := range palettes{
-    selectedPalette := palette
 
-for k, _ := range error_dither_algo {
-    selectedDitherAlgorithm := k
-// selectedPalette := "7Standard"
-// selectedDitherAlgorithm := "FloydSteinberg"
-strength := float32(1.0)
+func fetchandDither(file string,selectedPalette string,selectedDitherAlgorithm string,targetWidth int, targetHeight int)image.Image{
 
-d := dither.NewDitherer(palettes[selectedPalette])
-d.Serpentine = true
-
-if _, ok := error_dither_algo[selectedDitherAlgorithm]; ok {
-    d.Matrix = dither.ErrorDiffusionStrength(error_dither_algo[selectedDitherAlgorithm],strength)
-} else if _, ok := ordered_dither_algo[selectedDitherAlgorithm]; ok {
-    d.Mapper = dither.PixelMapperFromMatrix(ordered_dither_algo[selectedDitherAlgorithm],strength)
-}
+    // Define default options
+    if selectedPalette == "" {
+        selectedPalette = "7Standard"
+    }
+    if selectedDitherAlgorithm == "" {
+        selectedDitherAlgorithm = "StevenPigeon"
+    }
+    
 
 
-folder:="../asset"
+    strength := float32(1.0)
 
-//generate a list of files in folder
-file_ext := []string{".jpg", ".jpeg", ".png", ".bmp", ".gif"}
-fileList, err := generateFileList(folder, file_ext)
-if err != nil {
-    log.Println("Error generating file list:", err)
-    return
-}
+    d := dither.NewDitherer(palettes[selectedPalette])
+    d.Serpentine = true
 
+    if _, ok := error_dither_algo[selectedDitherAlgorithm]; ok {
+        d.Matrix = dither.ErrorDiffusionStrength(error_dither_algo[selectedDitherAlgorithm],strength)
+    } else if _, ok := ordered_dither_algo[selectedDitherAlgorithm]; ok {
+        d.Mapper = dither.PixelMapperFromMatrix(ordered_dither_algo[selectedDitherAlgorithm],strength)
+    }
 
-// Load the image from list
-for _, file := range fileList {
     log.Println("Processing file:", file)
-    file_name := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
     img, err := loadImage(file)
     if err != nil {
         log.Println("Error loading image:", err)
-        continue
+        return nil
     }
     //resize the image to 800x480
-    img = resizeImage(img, 800, 480,"Lanczos", "cut")
+    img = resizeImage(img, targetWidth,targetHeight,"Lanczos", "cut")
 
     img = d.Dither(img)
+    return img
+}
 
-    // Save the dithered image to a new file
-    outputPath := fmt.Sprintf("dithered_%s_%s_%s.png",file_name, selectedPalette, selectedDitherAlgorithm)
-    if err := saveImage(img, outputPath); err != nil {
-        log.Println("Error saving image:", err)
-        return
+func imgToBitmap(img image.Image, selectedPalette string, targetWidth int, targetHeight int) [][]bool{
+    // Separate the dithered image to bitmap of color channels
+
+    // Create a slice of bitmaps for each color in the palette
+    bitmaps := make([][]bool, len(palettes[selectedPalette]))
+    for i := range bitmaps {
+        bitmaps[i] = make([]bool, targetWidth*targetHeight)
     }
-    log.Println("Dithered image saved to", outputPath)}}}}
+    for i, color := range palettes[selectedPalette] {
+        for y := 0; y < targetHeight; y++ {
+            for x := 0; x < targetWidth; x++ {
+                if img.At(x, y) == color {
+                    bitmaps[i][int(y*targetWidth+x)]= true
+                } else {
+                    bitmaps[i][int(y*targetWidth+x)]= false
+                }
+            }
+        }
+    }
+    return bitmaps
+}
+
+func main() {
+
+    folder:="../asset"
+    file_ext := []string{".jpg", ".jpeg", ".png", ".bmp"}
+
+    color_palette := "7Eink"
+    dither_algorithm := "StevenPigeon"
+    targetWidth := 800
+    targetHeight := 480
+
+    fileList, err := generateFileList(folder, file_ext)
+    if err != nil {
+        log.Println("Error generating file list:", err)
+    }
+    // Process each file
+    for _, file := range fileList {
+        img := fetchandDither(file, color_palette, dither_algorithm, targetWidth, targetHeight)
+        if img == nil {
+            log.Println("Skipping file due to error:", file)
+            continue
+        }
+        // save the dithered image to a file
+        outputFile := fmt.Sprintf("%s_dithered.png", file)
+        err := saveImage(outputFile, img)
+        if err != nil {
+            log.Println("Error saving dithered image:", err)
+            continue}
+        // Convert the dithered image to a bitmap representation
+        bitmaps:=imgToBitmap(img, color_palette, targetWidth, targetHeight)
+        for i := range bitmaps {
+            bytes:= BitsToBytes(bitmaps[i][:])
+
+// save to .txt in 0x format
+            outputFile = fmt.Sprintf("%s_%d.txt", file,i)
+            err = saveBytesToFileHex(outputFile, bytes)
+            if err != nil {
+                log.Println("Error saving bytes to hex file:", err)
+            } else {
+                log.Println("Saved bitmap to hex file:", outputFile)
+            }
+        }
+    }}

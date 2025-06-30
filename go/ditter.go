@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 	"log"
@@ -123,45 +122,3 @@ func imgToBitmap(img image.Image, selectedPalette string, targetWidth int, targe
     return bitmaps
 }
 
-func main() {
-
-    folder:="../asset"
-    file_ext := []string{".jpg", ".jpeg", ".png", ".bmp"}
-
-    color_palette := "7Eink"
-    dither_algorithm := "StevenPigeon"
-    targetWidth := 800
-    targetHeight := 480
-
-    fileList, err := generateFileList(folder, file_ext)
-    if err != nil {
-        log.Println("Error generating file list:", err)
-    }
-    // Process each file
-    for _, file := range fileList {
-        img := fetchandDither(file, color_palette, dither_algorithm, targetWidth, targetHeight)
-        if img == nil {
-            log.Println("Skipping file due to error:", file)
-            continue
-        }
-        // save the dithered image to a file
-        outputFile := fmt.Sprintf("%s_dithered.png", file)
-        err := saveImage(outputFile, img)
-        if err != nil {
-            log.Println("Error saving dithered image:", err)
-            continue}
-        // Convert the dithered image to a bitmap representation
-        bitmaps:=imgToBitmap(img, color_palette, targetWidth, targetHeight)
-        for i := range bitmaps {
-            bytes:= BitsToBytes(bitmaps[i][:])
-
-// save to .txt in 0x format
-            outputFile = fmt.Sprintf("%s_%d.txt", file,i)
-            err = saveBytesToFileHex(outputFile, bytes)
-            if err != nil {
-                log.Println("Error saving bytes to hex file:", err)
-            } else {
-                log.Println("Saved bitmap to hex file:", outputFile)
-            }
-        }
-    }}

@@ -1,15 +1,16 @@
 package main
 
 import (
+	"fmt"
 	"image"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"log"
-	"fmt"
 
 	"github.com/anthonynsimon/bild/imgio"
 	"github.com/anthonynsimon/bild/transform"
+	"github.com/google/uuid"
 )
 
 func loadImage(path string) (image.Image, error) {
@@ -190,4 +191,8 @@ func saveBytesToFileHex(filename string, data []byte) error {
 		}
 	}
 	return nil
+}
+
+func generateUUID() string {
+	return uuid.New().String()
 }

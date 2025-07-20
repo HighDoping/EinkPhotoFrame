@@ -64,7 +64,7 @@ var ordered_dither_algo = map[string]dither.OrderedDitherMatrix{
     "Vertical5x3": dither.Vertical5x3,
 }
 
-func fetchandDither(file string,selectedPalette string,selectedDitherAlgorithm string,targetWidth int, targetHeight int)image.Image{
+func fetchAndDither(file string,selectedPalette string,selectedDitherAlgorithm string,targetWidth int, targetHeight int)image.Image{
 
     // Define default options
     if selectedPalette == "" {

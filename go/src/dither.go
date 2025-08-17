@@ -64,7 +64,7 @@ var ordered_dither_algo = map[string]dither.OrderedDitherMatrix{
     "Vertical5x3": dither.Vertical5x3,
 }
 
-func fetchAndDither(file string,selectedPalette string,selectedDitherAlgorithm string,targetWidth int, targetHeight int)image.Image{
+func fetchAndDither(file string,selectedPalette string,selectedDitherAlgorithm string,ditherStrength float32,targetWidth int, targetHeight int,resizeMethod string)image.Image{
 
     // Define default options
     if selectedPalette == "" {
@@ -76,7 +76,7 @@ func fetchAndDither(file string,selectedPalette string,selectedDitherAlgorithm s
     
 
 
-    strength := float32(1.0)
+    strength := float32(ditherStrength)
 
     d := dither.NewDitherer(palettes[selectedPalette])
     d.Serpentine = true
@@ -94,7 +94,7 @@ func fetchAndDither(file string,selectedPalette string,selectedDitherAlgorithm s
         return nil
     }
     //resize the image to 800x480
-    img = resizeImage(img, targetWidth,targetHeight,"Lanczos", "cut")
+    img = resizeImage(img, targetWidth,targetHeight,"Lanczos", resizeMethod)
 
     img = d.Dither(img)
     return img

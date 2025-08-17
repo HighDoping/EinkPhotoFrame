@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,7 +19,9 @@ import (
 
 var jwtMasterKey []byte
 var adminKey string
-
+var imageDir string
+var imageDirRefresh int
+var cacheDir string
 // Define models
 type Device struct {
     ID         uint `gorm:"primarykey"`
@@ -39,7 +42,8 @@ type DeviceSetting struct {
     Rotation        int `gorm:"not null;default:0"`
     Palette         string `gorm:"not null;default:'7Standard'"`
     DitherAlgorithm string `gorm:"not null;default:'StevenPigeon'"`
-    DitherStrength  float64 `gorm:"not null;default:1.0"`
+    DitherStrength  float32 `gorm:"not null;default:1.0"`
+    ResizeMethod    string `gorm:"not null;default:'cut'"`
     CreatedAt       time.Time
     UpdatedAt       time.Time
     Device          Device `gorm:"foreignKey:DeviceID;references:DeviceID"`
@@ -53,7 +57,7 @@ type DeviceTelemetry struct {
     Device      Device `gorm:"foreignKey:DeviceID;references:DeviceID"`
 }
 
-type Image struct {
+type DBImage struct {
     ID        uint `gorm:"primarykey"`
     Path      string `gorm:"uniqueIndex;not null"`
     UUID      string `gorm:"uniqueIndex;not null"`
@@ -66,11 +70,14 @@ type DitheredImage struct {
     UUID            string `gorm:"not null"`
     Palette         string `gorm:"not null"`
     DitherAlgorithm string `gorm:"not null"`
-    DitherStrength  float64 `gorm:"not null;default:1.0"`
+    DitherStrength  float32 `gorm:"not null;default:1.0"`
+    Height          int `gorm:"not null;default:480"`
+    Width           int `gorm:"not null;default:800"`
+    ResizeMethod    string `gorm:"not null;default:'cut'"`
     Path            string `gorm:"uniqueIndex;not null"`
     CreatedAt       time.Time
     UpdatedAt       time.Time
-    Image           Image `gorm:"foreignKey:UUID;references:UUID"`
+    DBImage           DBImage `gorm:"foreignKey:UUID;references:UUID"`
 }
 
 type RandomImage struct {
@@ -109,6 +116,23 @@ func init() {
         adminKey = "default_admin_token"
     }
     log.Println("Using admin token:", adminKey)
+    imageDir = os.Getenv("IMAGE_DIR")
+    if imageDir == "" {
+        log.Println("Warning: IMAGE_DIR not set in .env, using default")
+        imageDir = "./images"
+    }
+    log.Println("Using image directory:", imageDir)
+    imageDirRefresh,err= strconv.Atoi(os.Getenv("IMAGE_DIR_REFRESH"))
+    if err!=nil{
+        log.Println("Warning: IMAGE_DIR_REFRESH not set in .env, using default")
+        imageDirRefresh=86400
+    }
+    cacheDir= os.Getenv("CACHE_DIR")
+    if cacheDir == "" {
+        log.Println("Warning: CACHE_DIR not set in .env, using default")
+        cacheDir,_ = os.UserCacheDir()
+    }
+
 }
 
 
@@ -136,7 +160,7 @@ func handleRegisterRequest(c *gin.Context,db *gorm.DB) error {
     }
     // Check if device already exists
     var existingDevice Device
-    result := db.Where("device_id = ?, device_token = ?", deviceID, deviceToken).First(&existingDevice)
+    result := db.Where(&Device{DeviceID: deviceID,DeviceToken: deviceToken}).First(&existingDevice)
     if result.Error != nil && result.Error != gorm.ErrRecordNotFound {
         log.Printf("Error checking existing device: %v", result.Error)
         c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
@@ -218,10 +242,7 @@ func checkAdminKey(c *gin.Context) bool {
         return false
     }
     tokenString = tokenString[len("Bearer "):] // Remove "Bearer " prefix
-    if tokenString != adminKey {
-        return false
-    }
-    return true
+    return  tokenString == adminKey
 }
 
 func updateLastSeen(device Device , db *gorm.DB) error {
@@ -287,7 +308,7 @@ func authDevice(c *gin.Context, db *gorm.DB) (Device, jwt.Claims, error) {
 
     // Fetch device details from the database
     var device Device
-    result := db.Where("device_id = ? AND device_token = ?", deviceID, deviceToken).First(&device)
+    result := db.Where(&Device{DeviceID: deviceID,DeviceToken: deviceToken}).First(&device)
     if result.Error != nil {
         log.Printf("Error fetching device: %v", result.Error)
         return Device{}, nil, result.Error
@@ -364,7 +385,7 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
     if requestData["action"] == "get_settings" {
         // Get device settings
         var settings DeviceSetting
-        result := db.Where("device_id = ?", device.DeviceID).First(&settings)
+        result := db.Where(&DeviceSetting{DeviceID:  device.DeviceID}).First(&settings)
         if result.Error != nil {
             if result.Error == gorm.ErrRecordNotFound {
                 c.JSON(http.StatusNotFound, gin.H{"error": "Settings not found"})
@@ -380,7 +401,7 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
     if requestData["action"] == "update_settings" {
         // Update device settings
         var settings DeviceSetting
-        result := db.Where("device_id = ?", device.DeviceID).First(&settings)
+        result := db.Where(&DeviceSetting{DeviceID:  device.DeviceID}).First(&settings)
         if result.Error != nil {
             if result.Error == gorm.ErrRecordNotFound {
                 // Create new settings if not found
@@ -413,10 +434,13 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
         if ditherAlgorithm, ok := requestData["dither_algorithm"].(string); ok {
             settings.DitherAlgorithm = ditherAlgorithm
         }
-        if ditherStrength, ok := requestData["dither_strength"].(float64); ok {
+        if ditherStrength, ok := requestData["dither_strength"].(float32); ok {
             settings.DitherStrength = ditherStrength
         }
-        
+        if resizeMethod, ok := requestData["resize_method"].(string); ok {
+            settings.ResizeMethod = resizeMethod
+        }
+
         // Save updated settings to database
         settings.UpdatedAt = time.Now()
         result = db.Save(&settings)
@@ -432,7 +456,7 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
     if requestData["action"] == "update_telemetry" {
         // Update device telemetry
         var telemetry DeviceTelemetry
-        result := db.Where("device_id = ?", device.DeviceID).First(&telemetry)
+        result := db.Where(&DeviceTelemetry{DeviceID: device.DeviceID}).First(&telemetry)
         if result.Error != nil {
             if result.Error == gorm.ErrRecordNotFound {
                 // Create new telemetry if not found
@@ -467,7 +491,7 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
         // Get current image for the device
         // get current image, updated at, and image update interval
         var settings DeviceSetting
-        result := db.Where("device_id = ?", device.DeviceID).First(&settings)
+        result := db.Where(&DeviceSetting{DeviceID:  device.DeviceID}).First(&settings)
         if result.Error != nil {
             if result.Error == gorm.ErrRecordNotFound {
                 c.JSON(http.StatusNotFound, gin.H{"error": "Settings not found"})
@@ -481,16 +505,133 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
             // If the last update time plus interval is less than current time, return no update message
             c.JSON(http.StatusOK, gin.H{"message": "No image update needed"})
             return
-        } else{
-            // Return updated image
+        }     
+        nextImage,err:=getNextRandom(db,device)
+        if err != nil{
+            log.Printf("Error finding next random image:%v",err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
             return
         }
+        ditheredImage,err:=getDithered(db, nextImage, settings.Palette, settings.DitherAlgorithm, settings.DitherStrength,settings.Width,settings.Height,settings.ResizeMethod)
+        if err != nil {
+            log.Printf("Error getting dithered image: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+            return
+        }
+        ditheredImg,err:=loadImage(ditheredImage.Path)
+        if err != nil {
+            log.Printf("Error loading dithered image: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+            return
+        }
+        ditheredImgBit:=imgToBitmap(ditheredImg,settings.Palette, settings.Width, settings.Height)
+        // Update device's current image
+        device.CurrentImage = nextImage.UUID
+        device.UpdatedAt = time.Now()
+        db.Save(&device)
+    
+        // Return the processed image or image data
+        c.JSON(http.StatusOK, gin.H{
+            "message": "Image updated", 
+            "image_uuid": ditheredImgBit,
+        })
     }
     if requestData["action"] == "update_image" {
-        // Update current image for the device
-        //skip
+        // Force update image without time check
+        var settings DeviceSetting
+        result := db.Where(&DeviceSetting{DeviceID:  device.DeviceID}).First(&settings)
+        if result.Error != nil {
+            if result.Error == gorm.ErrRecordNotFound {
+                c.JSON(http.StatusNotFound, gin.H{"error": "Settings not found"})
+            } else {
+                log.Printf("Error fetching settings: %v", result.Error)
+                c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+            }
+            return
+        }
         
+        nextImage, err := getNextRandom(db, device)
+        if err != nil {
+            log.Printf("Error finding next random image: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+            return
+        }
+        
+        ditheredImage, err := getDithered(db, nextImage, settings.Palette, settings.DitherAlgorithm, 
+            settings.DitherStrength, settings.Width, settings.Height, settings.ResizeMethod)
+        if err != nil {
+            log.Printf("Error getting dithered image: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+            return
+        }
+        
+        ditheredImg, err := loadImage(ditheredImage.Path)
+        if err != nil {
+            log.Printf("Error loading dithered image: %v", err)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+            return
+        }
+        
+        ditheredImgBit := imgToBitmap(ditheredImg, settings.Palette, settings.Width, settings.Height)
+        
+        // Update device's current image
+        device.CurrentImage = nextImage.UUID
+        device.UpdatedAt = time.Now()
+        db.Save(&device)
+        
+        c.JSON(http.StatusOK, gin.H{
+            "message": "Image updated", 
+            "image_uuid": ditheredImgBit,
+        })
+        return
     }
+}
+
+func getNextRandom(db *gorm.DB, device Device) (DBImage, error) {
+    var nextImage DBImage
+    
+    if device.CurrentImage == "" {
+        // First time, get first random image
+        var firstRandom RandomImage
+        if err := db.Order("id ASC").First(&firstRandom).Error; err != nil {
+            return nextImage, fmt.Errorf("no images available")
+        }
+        
+        if err := db.Where(&DBImage{UUID: firstRandom.UUID}).First(&nextImage).Error; err != nil {
+            return nextImage, fmt.Errorf("failed to find image with UUID: %s", firstRandom.UUID)
+        }
+    } else {
+        // Find current position and get next
+        var currentRandom RandomImage
+        result := db.Where(&RandomImage{UUID:device.CurrentImage}).First(&currentRandom)
+        
+        if result.Error != nil {
+            // Current image not in random list, start from beginning
+            if err := db.Order("id ASC").First(&currentRandom).Error; err != nil {
+                return nextImage, fmt.Errorf("no images available")
+            }
+        } else {
+            // Get next random image
+            var nextRandom RandomImage
+            result = db.Where(&RandomImage{}).Where("id > ?", currentRandom.ID).Order("id ASC").First(&nextRandom)
+            
+            if result.Error != nil {
+                // Wrap around to first
+                if err := db.Order("id ASC").First(&nextRandom).Error; err != nil {
+                    return nextImage, fmt.Errorf("no images available")
+                }
+                currentRandom = nextRandom
+            } else {
+                currentRandom = nextRandom
+            }
+        }
+        
+        if err := db.Where(DBImage{UUID:currentRandom.UUID}).First(&nextImage).Error; err != nil {
+            return nextImage, fmt.Errorf("failed to find image with UUID: %s", currentRandom.UUID)
+        }
+    }
+    
+    return nextImage, nil
 }
 
 
@@ -499,51 +640,14 @@ func dbInit() (*gorm.DB, error) {
     if err != nil {
         return nil, fmt.Errorf("failed to connect to database: %w", err)
     }
-    
-
-
     // Auto migrate schemas
-    err = db.AutoMigrate(&Device{}, &DeviceSetting{}, &DeviceTelemetry{}, &Image{}, &DitheredImage{}, &RandomImage{})
+    err = db.AutoMigrate(&Device{}, &DeviceSetting{}, &DeviceTelemetry{}, &DBImage{}, &DitheredImage{}, &RandomImage{})
     if err != nil {
         return nil, fmt.Errorf("failed to migrate database schema: %w", err)
     }
     
     return db, nil
 }
-
-func refreshImages(db *gorm.DB) error {
-
-    
-    imagePaths, err := generateFileList("../asset", []string{".jpg", ".jpeg", ".png", ".bmp"})
-    if err != nil {
-        return fmt.Errorf("failed to generate file list: %w", err)
-    }
-
-    for _, path := range imagePaths {
-        // Check if image already exists
-        var count int64
-        db.Model(&Image{}).Where("path = ?", path).Count(&count)
-        if count > 0 {
-            continue // Skip if exists
-        }
-        
-        // Create new image
-        uuid := generateUUID()
-        image := Image{
-            Path: path,
-            UUID: uuid,
-        }
-        
-        result := db.Create(&image)
-        if result.Error != nil {
-            log.Printf("failed to insert image %s into database: %v\n", path, result.Error)
-            continue
-        }
-        fmt.Printf("Inserted image: %s with UUID: %s\n", path, uuid)
-    }
-    return nil
-}
-
 func dbClose(db *gorm.DB) error {
     if db == nil {
         return fmt.Errorf("database connection is nil")
@@ -560,74 +664,123 @@ func dbClose(db *gorm.DB) error {
     }
     return nil
 }
+func refreshImages(db *gorm.DB) error {
+    
+    imagePaths, err := generateFileList(imageDir, []string{".jpg", ".jpeg", ".png", ".bmp"})
+    if err != nil {
+        return fmt.Errorf("failed to generate file list: %w", err)
+    }
 
-func addDithered(db *gorm.DB, uuid string, palette string, ditherAlgorithm string, ditherStrength float64) error {
-    type DitheredImage struct {
-        ID              uint `gorm:"primarykey"`
-        UUID            string `gorm:"not null"`
-        Palette         string `gorm:"not null"`
-        DitherAlgorithm string `gorm:"not null"`
-        DitherStrength  float64 `gorm:"not null;default:1.0"`
-        Path            string `gorm:"uniqueIndex;not null"`
-        CreatedAt       time.Time
-        UpdatedAt       time.Time
+    for _, path := range imagePaths {
+        // Check if image already exists
+        var count int64
+        db.Model(&DBImage{}).Where("path = ?", path).Count(&count)
+        if count > 0 {
+            continue // Skip if exists
+        }
+        
+        // Create new image
+        uuid := generateUUID()
+        image := DBImage{
+            Path: path,
+            UUID: uuid,
+        }
+        
+        result := db.Create(&image)
+        if result.Error != nil {
+            log.Printf("failed to insert image %s into database: %v\n", path, result.Error)
+            continue
+        }
+        fmt.Printf("Inserted image: %s with UUID: %s\n", path, uuid)
     }
-    
+    return nil
+}
+
+
+
+func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32,targetWidth int, targetHeight int,resizeMethod string) (DitheredImage, error) {
     if db == nil {
-        return fmt.Errorf("database connection is nil")
+        return DitheredImage{},fmt.Errorf("database connection is nil")
     }
-    
-    // Check if dithered image exists
-    var count int64
-    db.Model(&DitheredImage{}).Where("uuid = ? AND palette = ? AND dither_algorithm = ? AND dither_strength = ?", 
-        uuid, palette, ditherAlgorithm, ditherStrength).Count(&count)
-    
-    if count > 0 {
-        return nil // Already exists
-    }
-    
     // Generate path for dithered image
-    path := fmt.Sprintf("dithered/%s_%s_%s_%0.2f.png", uuid, palette, ditherAlgorithm, ditherStrength)
+    path := fmt.Sprintf("%s/dithered_%s.png", cacheDir,generateUUID())
+    img:=fetchAndDither(image.Path, palette, ditherAlgorithm, ditherStrength, targetWidth, targetHeight,resizeMethod)
+    if img == nil {
+        return DitheredImage{},fmt.Errorf("failed to dither image: %s", image.Path)
+    }
+    // Save dithered image to cache
+    err := saveImage( path,img)
+    if err != nil {
+        return DitheredImage{},fmt.Errorf("failed to save dithered image to file: %w", err)
+    }
     
-    // Create new dithered image
     dithered := DitheredImage{
-        UUID:            uuid,
+        UUID:            image.UUID,
         Palette:         palette,
         DitherAlgorithm: ditherAlgorithm,
         DitherStrength:  ditherStrength,
+        Height:          targetHeight,
+        Width:           targetWidth,
+        ResizeMethod:    resizeMethod,
+        DBImage:         image,
+        CreatedAt:       time.Now(),
+        UpdatedAt:       time.Now(),
         Path:            path,
     }
     
     result := db.Create(&dithered)
     if result.Error != nil {
-        return fmt.Errorf("failed to insert dithered image into database: %w", result.Error)
+        return DitheredImage{},fmt.Errorf("failed to insert dithered image into database: %w", result.Error)
     }
     
-    log.Printf("Inserted dithered image with UUID: %s\n", uuid)
-    return nil
+    log.Printf("Inserted dithered image with UUID: %s\n", image.UUID)
+    return dithered, nil
 }
 
-func removeDithered(db *gorm.DB, uuid string, palette string, ditherAlgorithm string, ditherStrength float64) error {
-    type DitheredImage struct {
-        ID              uint `gorm:"primarykey"`
-        UUID            string `gorm:"not null"`
-        Palette         string `gorm:"not null"`
-        DitherAlgorithm string `gorm:"not null"`
-        DitherStrength  float64 `gorm:"not null;default:1.0"`
-        Path            string `gorm:"uniqueIndex;not null"`
-        CreatedAt       time.Time
-        UpdatedAt       time.Time
+func getDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32,targetWidth int, targetHeight int,resizeMethod string) (DitheredImage, error) {
+    if db == nil {
+        return DitheredImage{}, fmt.Errorf("database connection is nil")
     }
     
+    var dithered DitheredImage
+    // Check if dithered image exists
+    result := db.Where(&DitheredImage{UUID: image.UUID, Palette: palette, DitherAlgorithm: ditherAlgorithm, DitherStrength: ditherStrength, Width: targetWidth, Height: targetHeight, ResizeMethod: resizeMethod}).First(&dithered)
+    // If not found, create it
+    if result.Error != nil {
+        if result.Error == gorm.ErrRecordNotFound {
+            // Dithered image not found, create it
+            dithered, err := addDithered(db, image, palette, ditherAlgorithm, ditherStrength, targetWidth,targetHeight,resizeMethod)
+            if err != nil {
+                return DitheredImage{}, fmt.Errorf("failed to create dithered image: %w", err)
+            }
+            return dithered, nil}
+        
+        return DitheredImage{}, fmt.Errorf("failed to query dithered image: %w", result.Error)}
+    // return found dithered image
+    return dithered, nil
+}
+
+func removeDithered(db *gorm.DB, uuid string, palette string, ditherAlgorithm string, ditherStrength float32,targetWidth int, targetHeight int,resizeMethod string) error {    
     if db == nil {
         return fmt.Errorf("database connection is nil")
     }
     
-    result := db.Where("uuid = ? AND palette = ? AND dither_algorithm = ? AND dither_strength = ?", 
-        uuid, palette, ditherAlgorithm, ditherStrength).Delete(&DitheredImage{})
+    // First get the dithered image path
+    var dithered DitheredImage
+    if err := db.Where(&DitheredImage{UUID: uuid, Palette: palette, DitherAlgorithm: ditherAlgorithm, DitherStrength: ditherStrength, Width: targetWidth, Height: targetHeight, ResizeMethod: resizeMethod}).First(&dithered).Error; err != nil {
+        return fmt.Errorf("failed to find dithered image: %w", err)
+    }
     
+    // Delete from database
+    result := db.Where(&DitheredImage{UUID: uuid, Palette: palette, DitherAlgorithm: ditherAlgorithm, DitherStrength: ditherStrength, Width: targetWidth, Height: targetHeight, ResizeMethod: resizeMethod}).Delete(&DitheredImage{})
     if result.Error != nil {
         return fmt.Errorf("failed to delete dithered image from database: %w", result.Error)
+    }
+    
+    // Delete the image file from cache
+    if err := os.Remove(dithered.Path); err != nil {
+        log.Printf("Warning: Failed to delete cached file %s: %v", dithered.Path, err)
+        // Continue anyway as the database record is deleted
     }
     
     log.Printf("Deleted dithered image with UUID: %s\n", uuid)
@@ -635,15 +788,7 @@ func removeDithered(db *gorm.DB, uuid string, palette string, ditherAlgorithm st
 }
 
 func createRandomList(db *gorm.DB) error {
-    type Image struct {
-        UUID string
-    }
-    
-    type RandomImage struct {
-        ID   uint `gorm:"primarykey"`
-        UUID string `gorm:"uniqueIndex;not null"`
-    }
-    
+
     if db == nil {
         return fmt.Errorf("database connection is nil")
     }
@@ -652,13 +797,11 @@ func createRandomList(db *gorm.DB) error {
     db.Exec("DELETE FROM random_images")
     
     // Get all image UUIDs
-    var images []Image
-    if err := db.Model(&Image{}).Select("uuid").Find(&images).Error; err != nil {
+    var images []DBImage
+    if err := db.Model(&DBImage{}).Select("uuid").Find(&images).Error; err != nil {
         return fmt.Errorf("failed to fetch image UUIDs: %w", err)
     }
     
-    // Shuffle the UUIDs
-    rand.Seed(time.Now().UnixNano())
     rand.Shuffle(len(images), func(i, j int) {
         images[i], images[j] = images[j], images[i]
     })
@@ -672,11 +815,69 @@ func createRandomList(db *gorm.DB) error {
     return nil
 }
 
+func updateRandomList(db *gorm.DB) error {
+    // For each entry in random_images, check if the corresponding image exists in images
+    // delete the entry if the image does not exist
+    // Then check images and add new random images if needed
+    var randomImages []RandomImage
+    if err := db.Find(&randomImages).Error; err != nil {
+        return fmt.Errorf("failed to fetch random images: %w", err)
+    }
+    for _, randomImage := range randomImages {
+        var count int64
+        db.Model(&DBImage{}).Where("uuid = ?", randomImage.UUID).Count(&count)
+        if count == 0 {
+            // DBImage does not exist, delete from random_images
+            if err := db.Delete(&RandomImage{}, randomImage.ID).Error; err != nil {
+                return fmt.Errorf("failed to delete random image %s: %w", randomImage.UUID, err)
+            }
+            log.Printf("Deleted random image with UUID: %s\n", randomImage.UUID)
+        }
+    }
+    // Now check if we need to add new random images
+    var images []DBImage
+    if err := db.Model(&DBImage{}).Select("uuid").Find(&images).Error; err != nil {
+        return fmt.Errorf("failed to fetch image UUIDs: %w", err)
+    }
+    // Get current random images
+    // Get the current count of random images
+    var randomCount int64
+    if err := db.Model(&RandomImage{}).Count(&randomCount).Error; err != nil {
+        return fmt.Errorf("failed to count random images: %w", err)
+    }
+
+    // For each image that isn't in the random list, insert it at a random position
+    for _, img := range images {
+        var count int64
+        db.Model(&RandomImage{}).Where("uuid = ?", img.UUID).Count(&count)
+        if count == 0 {
+            // DBImage does not exist in random_images, add it at a random position
+            position := rand.Intn(int(randomCount) + 1) // Random position from 0 to current count
+            
+            // Shift all entries at or after the random position
+            if err := db.Exec("UPDATE random_images SET id = id + 1 WHERE id >= ?", position + 1).Error; err != nil {
+                return fmt.Errorf("failed to shift random images: %w", err)
+            }
+            
+            // Insert the new entry at the random position
+            randomImage := RandomImage{ID: uint(position + 1), UUID: img.UUID}
+            if err := db.Create(&randomImage).Error; err != nil {
+                return fmt.Errorf("failed to insert random image %s at position %d: %w", img.UUID, position, err)
+            }
+            
+            log.Printf("Inserted random image with UUID: %s at position %d\n", img.UUID, position)
+            randomCount++ // Update the count for next iteration
+        }
+    }
+    log.Println("Random images list updated.")
+    return nil
+}
+
 func startAPIServer(db *gorm.DB) {
     router := gin.Default()
 
     // Use closures to pass the db connection to handlers
-    router.GET("/register", func(c *gin.Context) {
+    router.POST("/register", func(c *gin.Context) {
         handleRegisterRequest(c, db)
     })
 
@@ -705,8 +906,8 @@ func main(){
         log.Fatalf("Failed to refresh images: %v", err)
     }
 
-    if err := createRandomList(db); err != nil {
-        log.Fatalf("Failed to create random image list: %v", err)
+    if err := updateRandomList(db); err != nil {
+        log.Fatalf("Failed to update random image list: %v", err)
     }
 
     // Start API server

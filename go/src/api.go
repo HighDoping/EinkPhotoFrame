@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3" // Import the SQLite driver
 	"gorm.io/driver/sqlite"
@@ -27,7 +27,7 @@ type Device struct {
     ID         uint `gorm:"primarykey"`
     DeviceID   string `gorm:"uniqueIndex;not null"`
     DeviceName string `gorm:"not null"`
-    DeviceToken string `gorm:"uniqueIndex;not null"`
+    DeviceToken string `gorm:"unique"`
     CurrentImage string
     CreatedAt time.Time
     UpdatedAt time.Time
@@ -63,11 +63,13 @@ type DBImage struct {
     UUID      string `gorm:"uniqueIndex;not null"`
     CreatedAt time.Time
     UpdatedAt time.Time
+    DitheredImages []DitheredImage `gorm:"foreignKey:DBImageUUID;references:UUID"`
 }
 
 type DitheredImage struct {
     ID              uint `gorm:"primarykey"`
     UUID            string `gorm:"not null"`
+    DBImageUUID     string `gorm:"not null"` // Foreign key to DBImage
     Palette         string `gorm:"not null"`
     DitherAlgorithm string `gorm:"not null"`
     DitherStrength  float32 `gorm:"not null;default:1.0"`
@@ -77,19 +79,11 @@ type DitheredImage struct {
     Path            string `gorm:"uniqueIndex;not null"`
     CreatedAt       time.Time
     UpdatedAt       time.Time
-    DBImage           DBImage `gorm:"foreignKey:UUID;references:UUID"`
 }
 
 type RandomImage struct {
     ID   uint `gorm:"primarykey"`
     UUID string `gorm:"uniqueIndex;not null"`
-}
-
-type jwtCustomClaims struct {
-    DeviceID    string `json:"device_id"`
-    DeviceToken string `json:"device_token"`
-    DeviceName  string `json:"device_name"`
-    jwt.RegisteredClaims
 }
 
     
@@ -100,15 +94,6 @@ func init() {
         log.Println("Warning: Error loading .env file:", err)
     }
 
-    // Get JWT master key from environment
-    jwtKey := os.Getenv("JWT_MASTER_KEY")
-    if jwtKey == "" {
-        log.Println("Warning: JWT_MASTER_KEY not set in .env, using default (not secure for production)")
-        jwtKey = "default_insecure_key"
-    }
-    jwtMasterKey = []byte(jwtKey)
-
-    log.Println("Using JWT master key:", jwtKey)
     // Get admin key from environment
     adminKey= os.Getenv("ADMIN_KEY")
     if adminKey == "" {
@@ -149,41 +134,52 @@ func handleRegisterRequest(c *gin.Context,db *gorm.DB) error {
         c.JSON(http.StatusBadRequest, gin.H{"error": "device_id is required"})
         return fmt.Errorf("device_id is required")
     }
-    deviceToken, ok := requestData["device_token"].(string)
-    if !ok || deviceToken == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "device_token is required"})
-        return fmt.Errorf("device_token is required")
-    }
     deviceName, ok := requestData["device_name"].(string)
     if !ok || deviceName == "" {
         deviceName = deviceID // Use device_id as default name if not provided
     }
     // Check if device already exists
     var existingDevice Device
-    result := db.Where(&Device{DeviceID: deviceID,DeviceToken: deviceToken}).First(&existingDevice)
+    result := db.Where(&Device{DeviceID: deviceID,DeviceName: deviceName}).First(&existingDevice)
     if result.Error != nil && result.Error != gorm.ErrRecordNotFound {
         log.Printf("Error checking existing device: %v", result.Error)
         c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
         return result.Error
     }
     if result.RowsAffected > 0 {
-        // Device already exists, return JWT token
-        token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwtCustomClaims{
-            DeviceID:    existingDevice.DeviceID,
-            DeviceToken: existingDevice.DeviceToken,
-            DeviceName:  existingDevice.DeviceName,
-            RegisteredClaims: jwt.RegisteredClaims{
-                Issuer:    "device_api",
-                IssuedAt: jwt.NewNumericDate(time.Now()),
-                ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // Token valid for 24 hours
-            },
-        })
-        tokenString, err := token.SignedString(jwtMasterKey)
-        if err != nil {
-            log.Printf("Error signing token: %v", err)
+        // Device already exists, check if has settings, if not create default settings
+        var settings DeviceSetting
+        result = db.Where(&DeviceSetting{DeviceID: deviceID}).First(&settings)
+        if result.Error != nil && result.Error != gorm.ErrRecordNotFound {
+            log.Printf("Error checking device settings: %v", result.Error)
             c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-            return err
+            return result.Error
         }
+        if result.RowsAffected == 0 {
+            // Create default settings
+            settings = DeviceSetting{
+                DeviceID: deviceID,
+                Device: existingDevice,}
+            result = db.Create(&settings)
+            if result.Error != nil {
+                log.Printf("Error creating default settings: %v", result.Error)
+                c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+                return result.Error
+            }
+            log.Printf("Created default settings for device: %s", deviceID)
+        }
+        //create bearer token
+        tokenString:=generateUUID()
+        //save to device table
+        existingDevice.DeviceToken = tokenString
+        existingDevice.UpdatedAt = time.Now()
+        result = db.Save(&existingDevice)
+        if result.Error != nil {
+            log.Printf("Error saving device: %v", result.Error)
+            c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+            return result.Error
+        }
+
         c.JSON(http.StatusOK, gin.H{"message": "Device registered", "token": tokenString})
         log.Printf("Device registered: %s (%s)", existingDevice.DeviceID, existingDevice.DeviceName)
         return nil
@@ -208,20 +204,15 @@ func handleAdminDeviceRegisterRequest(c *gin.Context,db *gorm.DB) {
     }
     // Process the request data as needed
     device_id:= requestData["device_id"].(string)
-    device_token := requestData["device_token"].(string)
-    if device_id == "" || device_token == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "device_id and device_token are required"})
+    device_name := requestData["device_name"].(string)
+    if device_id == "" || device_name == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "device_id and device_name are required"})
         return
-    }
-    device_name := device_id
-    if name, ok := requestData["device_name"].(string); ok && name != "" {
-        device_name = name
     }
     // Insert the device into the database
     device := Device{
         DeviceID:   device_id,
         DeviceName: device_name,
-        DeviceToken: device_token,
         CreatedAt: time.Now(),
         UpdatedAt: time.Now(),
     }
@@ -231,7 +222,7 @@ func handleAdminDeviceRegisterRequest(c *gin.Context,db *gorm.DB) {
         c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
         return
     }
-    c.JSON(http.StatusOK, gin.H{"message": "Device registered successfully", "device_id": device.DeviceID, "device_token": device.DeviceToken, "device_name": device.DeviceName})
+    c.JSON(http.StatusOK, gin.H{"message": "Device registered successfully", "device_id": device.DeviceID, "device_name": device.DeviceName})
     log.Printf("Device registered: %s (%s)", device.DeviceID, device.DeviceName)
 }
 
@@ -273,95 +264,38 @@ func getBearerToken(c *gin.Context) (string, error) {
     return tokenString[7:], nil
 }
 
-func getJWTClaims(c *gin.Context) (jwt.Claims, error) {
-    // Extract and parse the JWT token from the Authorization header
-    tokenString, err := getBearerToken(c)
-    if err != nil {
-        return nil, err
-    }
-    token, err := jwt.ParseWithClaims(tokenString, &jwtCustomClaims{}, func(token *jwt.Token) (interface{}, error) {
-        if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-            return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-        }
-        return jwtMasterKey, nil
-    })
-    if err != nil || !token.Valid {
-        return nil, fmt.Errorf("invalid token: %v", err)
-    }
-    claims, ok := token.Claims.(*jwtCustomClaims)
-    if !ok {
-        return nil, fmt.Errorf("invalid token claims")
-    }
-    return claims, nil
-    //Can add expiration check here if needed
-}
 
-func authDevice(c *gin.Context, db *gorm.DB) (Device, jwt.Claims, error) {
-    // Check if the request has a valid device token via JWT, returns device details
-    claims, err := getJWTClaims(c)
+func authDevice(c *gin.Context, db *gorm.DB) (Device, error) {
+    // Check if the request has a valid device token, returns device details
+    deviceToken,err:=getBearerToken(c)
     if err != nil {
-        log.Printf("Error getting JWT claims: %v", err)
-        return Device{}, nil, err
+        log.Printf("Error getting Bearer token: %v", err)
+        return Device{}, err
     }
-    deviceID:= claims.(*jwtCustomClaims).DeviceID
-    deviceToken := claims.(*jwtCustomClaims).DeviceToken
 
     // Fetch device details from the database
     var device Device
-    result := db.Where(&Device{DeviceID: deviceID,DeviceToken: deviceToken}).First(&device)
+    result := db.Where(&Device{DeviceToken: deviceToken}).First(&device)
     if result.Error != nil {
         log.Printf("Error fetching device: %v", result.Error)
-        return Device{}, nil, result.Error
+        return Device{},  result.Error
     }
     if device.DeviceID == "" {
-        return Device{}, nil, fmt.Errorf("device not found")
+        return Device{},  fmt.Errorf("device not found")
     }
     log.Printf("Device authenticated: %s (%s)", device.DeviceID, device.DeviceName)
     // Update last seen timestamp for the device
     err = updateLastSeen(device, db)
     if err != nil {
         log.Printf("Error updating last seen for device %s: %v", device.DeviceID, err)
-        return Device{}, nil, err
+        return Device{},  err
     }
     // Return device details and claims
-    return device, claims, nil
-}
-
-
-func refreshJWT(c *gin.Context, db *gorm.DB) (string,error) {
-    // Refresh the JWT token for the device
-    device, claims, err := authDevice(c, db)
-    if err != nil {
-        return "", err
-    }
-    // Check expiration of the current token
-    if claims == nil {
-        return "", fmt.Errorf("invalid token claims")
-    }
-    if claims.(*jwtCustomClaims).ExpiresAt.Time.Before(time.Now().Add(-time.Hour)) {
-        // Create a new JWT token with the same claims
-        newToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwtCustomClaims{
-            DeviceID:    device.DeviceID,
-            DeviceToken: device.DeviceToken,
-            DeviceName:  device.DeviceName,
-            RegisteredClaims: jwt.RegisteredClaims{
-                Issuer:    "device_api",
-                IssuedAt: jwt.NewNumericDate(time.Now()),
-                ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)), // Token valid for 24 hours
-            },
-        })
-        newTokenString, err := newToken.SignedString(jwtMasterKey)
-        if err != nil {
-            log.Printf("Error signing new token: %v", err)
-            return "", err
-        }
-        return newTokenString, nil}
-    // If the token is still valid, return the existing token
-    return "", fmt.Errorf("token is still valid, no refresh needed")
+    return device, nil
 }
 
 func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
-    device, _, err := authDevice(c, db)
+    device, err := authDevice(c, db)
     if err != nil {
         c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized device"})
         return
@@ -370,16 +304,6 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
     var requestData map[string]interface{}
     if err := c.BindJSON(&requestData); err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON"})
-        return
-    }
-    if requestData["action"] == "refresh_token" {
-        // Refresh the JWT token
-        newToken, err := refreshJWT(c, db)
-        if err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to refresh token"})
-            return
-        }
-        c.JSON(http.StatusOK, gin.H{"message": "Token refreshed", "token": newToken})
         return
     }
     if requestData["action"] == "get_settings" {
@@ -533,7 +457,8 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
         // Return the processed image or image data
         c.JSON(http.StatusOK, gin.H{
             "message": "Image updated", 
-            "image_uuid": ditheredImgBit,
+            "image_uuid": nextImage.UUID,
+            "image": ditheredImgBit,
         })
     }
     if requestData["action"] == "update_image" {
@@ -573,7 +498,20 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
         }
         
         ditheredImgBit := imgToBitmap(ditheredImg, settings.Palette, settings.Width, settings.Height)
-        
+        //save dithered image to cache
+        print(len(ditheredImgBit))
+        filepaths := make([]string, len(ditheredImgBit))
+        for i:=0;i<len(ditheredImgBit);i++ {
+            bytes_data:=BitsToBytes(ditheredImgBit[i])
+            filePath := fmt.Sprintf("%s/%s_%d.bin", cacheDir, ditheredImage.UUID,i)
+            err = saveBytesToFile(filePath, bytes_data)
+            if err != nil {
+                log.Printf("Error saving dithered image to file: %v", err)
+                c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+                return
+            }
+            filepaths[i] = strings.Replace(filePath, cacheDir, "assets", 1)
+        }
         // Update device's current image
         device.CurrentImage = nextImage.UUID
         device.UpdatedAt = time.Now()
@@ -581,7 +519,8 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
         
         c.JSON(http.StatusOK, gin.H{
             "message": "Image updated", 
-            "image_uuid": ditheredImgBit,
+            "image_uuid": nextImage.UUID,
+            "image": filepaths,
         })
         return
     }
@@ -613,14 +552,20 @@ func getNextRandom(db *gorm.DB, device Device) (DBImage, error) {
         } else {
             // Get next random image
             var nextRandom RandomImage
-            result = db.Where(&RandomImage{}).Where("id > ?", currentRandom.ID).Order("id ASC").First(&nextRandom)
+            result := db.Where("id > ?", currentRandom.ID).Order("id ASC").First(&nextRandom)
             
             if result.Error != nil {
                 // Wrap around to first
-                if err := db.Order("id ASC").First(&nextRandom).Error; err != nil {
-                    return nextImage, fmt.Errorf("no images available")
+                if result.Error == gorm.ErrRecordNotFound {
+                    // Handle wrap-around case - get the first record
+                    if err := db.Order("id ASC").First(&nextRandom).Error; err != nil {
+                        return nextImage, fmt.Errorf("no images available")
+                    }
+                    currentRandom = nextRandom
+                } else {
+                    // Other database error
+                    return nextImage, fmt.Errorf("database error: %w", result.Error)
                 }
-                currentRandom = nextRandom
             } else {
                 currentRandom = nextRandom
             }
@@ -645,7 +590,21 @@ func dbInit() (*gorm.DB, error) {
     if err != nil {
         return nil, fmt.Errorf("failed to migrate database schema: %w", err)
     }
-    
+
+    // Clean DitheredImage table
+    var ditheredImages []DitheredImage
+    if err := db.Find(&ditheredImages).Error; err != nil {
+        return nil, fmt.Errorf("failed to fetch dithered images: %w", err)
+    }
+    for _, dithered := range ditheredImages {
+        // Check if the dithered image file exists
+        if err := db.Delete(&dithered).Error; err != nil {
+            log.Printf("failed to delete dithered image %s from database: %v\n", dithered.Path, err)
+            continue
+        }
+        log.Printf("Deleted dithered image: %s with UUID: %s (file no longer exists)\n", dithered.Path, dithered.UUID)
+    }
+
     return db, nil
 }
 func dbClose(db *gorm.DB) error {
@@ -665,12 +624,39 @@ func dbClose(db *gorm.DB) error {
     return nil
 }
 func refreshImages(db *gorm.DB) error {
-    
     imagePaths, err := generateFileList(imageDir, []string{".jpg", ".jpeg", ".png", ".bmp"})
     if err != nil {
         return fmt.Errorf("failed to generate file list: %w", err)
     }
 
+    // Create a map for quick lookup of paths
+    imagePathMap := make(map[string]bool)
+    for _, path := range imagePaths {
+        imagePathMap[path] = true
+    }
+
+    // Find and remove entries in DB that no longer exist in the file system
+    var images []DBImage
+    if err := db.Find(&images).Error; err != nil {
+        return fmt.Errorf("failed to fetch existing images: %w", err)
+    }
+
+    for _, img := range images {
+        if !imagePathMap[img.Path] {
+            // File doesn't exist anymore, delete from database
+            if err := db.Delete(&img).Error; err != nil {
+                log.Printf("failed to delete non-existent image %s from database: %v\n", img.Path, err)
+                continue
+            }
+            // Also clean up any dithered versions
+            if err := db.Where("uuid = ?", img.UUID).Delete(&DitheredImage{}).Error; err != nil {
+                log.Printf("failed to delete dithered images for %s: %v\n", img.UUID, err)
+            }
+            log.Printf("Deleted image: %s with UUID: %s (file no longer exists)\n", img.Path, img.UUID)
+        }
+    }
+
+    // Add new images
     for _, path := range imagePaths {
         // Check if image already exists
         var count int64
@@ -703,7 +689,8 @@ func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm str
         return DitheredImage{},fmt.Errorf("database connection is nil")
     }
     // Generate path for dithered image
-    path := fmt.Sprintf("%s/dithered_%s.png", cacheDir,generateUUID())
+    uuid:=generateUUID()
+    path := fmt.Sprintf("%s/dithered_%s.png", cacheDir,uuid)
     img:=fetchAndDither(image.Path, palette, ditherAlgorithm, ditherStrength, targetWidth, targetHeight,resizeMethod)
     if img == nil {
         return DitheredImage{},fmt.Errorf("failed to dither image: %s", image.Path)
@@ -715,14 +702,14 @@ func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm str
     }
     
     dithered := DitheredImage{
-        UUID:            image.UUID,
+        UUID:            uuid,
+        DBImageUUID:     image.UUID,
         Palette:         palette,
         DitherAlgorithm: ditherAlgorithm,
         DitherStrength:  ditherStrength,
         Height:          targetHeight,
         Width:           targetWidth,
         ResizeMethod:    resizeMethod,
-        DBImage:         image,
         CreatedAt:       time.Now(),
         UpdatedAt:       time.Now(),
         Path:            path,
@@ -732,8 +719,8 @@ func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm str
     if result.Error != nil {
         return DitheredImage{},fmt.Errorf("failed to insert dithered image into database: %w", result.Error)
     }
-    
-    log.Printf("Inserted dithered image with UUID: %s\n", image.UUID)
+
+    log.Printf("Inserted dithered image with UUID: %s\n", dithered.UUID)
     return dithered, nil
 }
 
@@ -742,9 +729,18 @@ func getDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm str
         return DitheredImage{}, fmt.Errorf("database connection is nil")
     }
     
+    // Check if dithered image already exists
     var dithered DitheredImage
-    // Check if dithered image exists
-    result := db.Where(&DitheredImage{UUID: image.UUID, Palette: palette, DitherAlgorithm: ditherAlgorithm, DitherStrength: ditherStrength, Width: targetWidth, Height: targetHeight, ResizeMethod: resizeMethod}).First(&dithered)
+    result := db.Where(&DitheredImage{
+        DBImageUUID:     image.UUID,
+        Palette:         palette,
+        DitherAlgorithm: ditherAlgorithm,
+        DitherStrength:  ditherStrength,
+        Width:           targetWidth,
+        Height:          targetHeight,
+        ResizeMethod:    resizeMethod,
+    }).First(&dithered)
+
     // If not found, create it
     if result.Error != nil {
         if result.Error == gorm.ErrRecordNotFound {
@@ -852,11 +848,27 @@ func updateRandomList(db *gorm.DB) error {
         db.Model(&RandomImage{}).Where("uuid = ?", img.UUID).Count(&count)
         if count == 0 {
             // DBImage does not exist in random_images, add it at a random position
-            position := rand.Intn(int(randomCount) + 1) // Random position from 0 to current count
+            position := 0
             
-            // Shift all entries at or after the random position
-            if err := db.Exec("UPDATE random_images SET id = id + 1 WHERE id >= ?", position + 1).Error; err != nil {
-                return fmt.Errorf("failed to shift random images: %w", err)
+            // Only calculate random position if we have existing entries
+            if randomCount > 0 {
+                position = rand.Intn(int(randomCount))
+            }
+            
+            // Shift all entries at or after the random position, starting from the highest ID
+            // This prevents UNIQUE constraint violations
+            var maxID uint
+            if randomCount > 0 {
+                if err := db.Model(&RandomImage{}).Select("MAX(id)").Scan(&maxID).Error; err != nil {
+                    return fmt.Errorf("failed to get max ID: %w", err)
+                }
+                
+                // Update IDs from highest to lowest to avoid conflicts
+                for i := maxID; i >= uint(position+1); i-- {
+                    if err := db.Exec("UPDATE random_images SET id = ? WHERE id = ?", i+1, i).Error; err != nil {
+                        return fmt.Errorf("failed to shift random image with ID %d: %w", i, err)
+                    }
+                }
             }
             
             // Insert the new entry at the random position
@@ -877,22 +889,38 @@ func startAPIServer(db *gorm.DB) {
     router := gin.Default()
 
     // Use closures to pass the db connection to handlers
+    // Serve static files with authentication
+    router.GET("/assets/*filepath", func(c *gin.Context) {
+        // Check authentication first
+        device, err := authDevice(c, db)
+        if err != nil {
+            c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized access to assets"})
+            return
+        }
+        
+        // If authenticated, serve the requested file
+        path := c.Param("filepath")
+        c.File(cacheDir + path)
+        
+        log.Printf("Device %s (%s) accessed asset: %s", device.DeviceID, device.DeviceName, path)
+    })
+
     router.POST("/register", func(c *gin.Context) {
         handleRegisterRequest(c, db)
     })
 
-    router.GET("/dev", func(c *gin.Context) {
+    router.POST("/dev", func(c *gin.Context) {
         handleDeviceRequest(c, db)
     })
 
-    router.GET("/admin/device_register", func(c *gin.Context) {
+    router.POST("/admin/device_register", func(c *gin.Context) {
         // Admin endpoint, can be used for management tasks
         handleAdminDeviceRegisterRequest(c, db)
     })
 
-    
+
     log.Println("Starting API server on port 8080...")
-    log.Fatal(router.Run(":8080"))
+    log.Fatal(router.RunTLS(":8080","cert.pem","key.pem"))
 }
 
 func main(){

@@ -3,51 +3,14 @@ package main
 import (
 	"log"
 	"net/http"
-	"os"
-	"strconv"
+
+	"github.com/HighDoping/EinkPhotoFrame/config"
 
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 	"gorm.io/gorm"
 )
 
-var jwtMasterKey []byte
-var adminKey string
-var imageDir string
-var imageDirRefresh int
-var cacheDir string
-
-func init() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("Warning: Error loading .env file:", err)
-	}
-	// Get admin key from environment
-	adminKey = os.Getenv("ADMIN_KEY")
-	if adminKey == "" {
-		log.Println("Warning: ADMIN_TOKEN not set in .env, using default (not secure for production)")
-		adminKey = "default_admin_token"
-	}
-	log.Println("Using admin token:", adminKey)
-	imageDir = os.Getenv("IMAGE_DIR")
-	if imageDir == "" {
-		log.Println("Warning: IMAGE_DIR not set in .env, using default")
-		imageDir = "./images"
-	}
-	log.Println("Using image directory:", imageDir)
-	imageDirRefresh, err = strconv.Atoi(os.Getenv("IMAGE_DIR_REFRESH"))
-	if err != nil {
-		log.Println("Warning: IMAGE_DIR_REFRESH not set in .env, using default")
-		imageDirRefresh = 86400
-	}
-	cacheDir = os.Getenv("CACHE_DIR")
-	if cacheDir == "" {
-		log.Println("Warning: CACHE_DIR not set in .env, using default")
-		cacheDir, _ = os.UserCacheDir()
-	}
-}
-
-func startAPIServer(db *gorm.DB) {
+func startAPIServer(db *gorm.DB, cfg config.Config) {
 	router := gin.Default()
 
 	// Use closures to pass the db connection to handlers
@@ -62,7 +25,7 @@ func startAPIServer(db *gorm.DB) {
 
 		// If authenticated, serve the requested file
 		path := c.Param("filepath")
-		c.File(cacheDir + path)
+		c.File(cfg.CacheDir + path)
 
 		log.Printf("Device %s (%s) accessed asset: %s", device.DeviceID, device.DeviceName, path)
 	})
@@ -72,26 +35,28 @@ func startAPIServer(db *gorm.DB) {
 	})
 
 	router.POST("/dev", func(c *gin.Context) {
-		handleDeviceRequest(c, db)
+		handleDeviceRequest(c, db, cfg)
 	})
 
 	router.POST("/admin/device_register", func(c *gin.Context) {
 		// Admin endpoint, can be used for management tasks
-		handleAdminDeviceRegisterRequest(c, db)
+		handleAdminDeviceRegisterRequest(c, db, cfg)
 	})
 
 	log.Println("Starting API server on port 8080...")
-	log.Fatal(router.RunTLS(":8080", "cert.pem", "key.pem"))
+	log.Fatal(router.RunTLS(":8080",cfg.CertFile, cfg.KeyFile))
 }
 
 func main() {
+	cfg := config.LoadFromEnv()
+
 	db, err := dbInit()
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer dbClose(db)
 
-	if err := refreshImages(db); err != nil {
+	if err := refreshImages(db, cfg); err != nil {
 		log.Fatalf("Failed to refresh images: %v", err)
 	}
 
@@ -100,5 +65,5 @@ func main() {
 	}
 
 	// Start API server
-	startAPIServer(db)
+	startAPIServer(db, cfg)
 }

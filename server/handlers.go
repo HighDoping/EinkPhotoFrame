@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/HighDoping/EinkPhotoFrame/config"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -97,74 +97,9 @@ func handleRegisterRequest(c *gin.Context, db *gorm.DB) error {
 	log.Printf("Unauthorized device registration attempt: %s", deviceID)
 	return fmt.Errorf("unauthorized device registration")
 }
-func checkAdminKey(c *gin.Context) bool {
+func handleAdminDeviceRegisterRequest(c *gin.Context, db *gorm.DB, cfg config.Config) {
 	// Check if the request has a valid admin key
-	tokenString := c.GetHeader("Authorization")
-	if tokenString == "" {
-		return false
-	}
-	tokenString = tokenString[len("Bearer "):] // Remove "Bearer " prefix
-	return tokenString == adminKey
-}
-
-func updateLastSeen(device Device, db *gorm.DB) error {
-	// Update the last seen timestamp for the device
-	deviceTelemetry := DeviceTelemetry{
-		DeviceID: device.DeviceID,
-		LastSeen: time.Now(),
-	}
-	result := db.Save(&deviceTelemetry)
-	if result.Error != nil {
-		log.Printf("Error updating last seen for device %s: %v", device.DeviceID, result.Error)
-		return result.Error
-	}
-	log.Printf("Last seen updated for device %s at %v", device.DeviceID, deviceTelemetry.LastSeen)
-	return nil
-}
-
-func getBearerToken(c *gin.Context) (string, error) {
-	// Extract the Bearer token from the Authorization header
-	tokenString := c.GetHeader("Authorization")
-	if tokenString == "" {
-		return "", fmt.Errorf("authorization header missing")
-	}
-	if len(tokenString) < 7 || tokenString[:7] != "Bearer " {
-		return "", fmt.Errorf("invalid authorization header format")
-	}
-	return tokenString[7:], nil
-}
-
-func authDevice(c *gin.Context, db *gorm.DB) (Device, error) {
-	// Check if the request has a valid device token, returns device details
-	deviceToken, err := getBearerToken(c)
-	if err != nil {
-		log.Printf("Error getting Bearer token: %v", err)
-		return Device{}, err
-	}
-
-	// Fetch device details from the database
-	var device Device
-	result := db.Where(&Device{DeviceToken: deviceToken}).First(&device)
-	if result.Error != nil {
-		log.Printf("Error fetching device: %v", result.Error)
-		return Device{}, result.Error
-	}
-	if device.DeviceID == "" {
-		return Device{}, fmt.Errorf("device not found")
-	}
-	log.Printf("Device authenticated: %s (%s)", device.DeviceID, device.DeviceName)
-	// Update last seen timestamp for the device
-	err = updateLastSeen(device, db)
-	if err != nil {
-		log.Printf("Error updating last seen for device %s: %v", device.DeviceID, err)
-		return Device{}, err
-	}
-	// Return device details and claims
-	return device, nil
-}
-func handleAdminDeviceRegisterRequest(c *gin.Context, db *gorm.DB) {
-	// Check if the request has a valid admin key
-	if !checkAdminKey(c) {
+	if !checkAdminKey(c, cfg) {
 		c.JSON(http.StatusUnauthorized, errorResponse("Unauthorized access"))
 		return // Unauthorized access
 	}
@@ -216,7 +151,7 @@ func handleAdminDeviceRegisterRequest(c *gin.Context, db *gorm.DB) {
 	log.Printf("Device registered: %s (%s)", device.DeviceID, device.DeviceName)
 }
 
-func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
+func handleDeviceRequest(c *gin.Context, db *gorm.DB, cfg config.Config) {
 	device, err := authDevice(c, db)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, errorResponse("Unauthorized device"))
@@ -342,132 +277,46 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB) {
 		return
 	}
 	if requestData["action"] == "get_image" {
-		// Get current image for the device
-		// get current image, updated at, and image update interval
-		var settings DeviceSetting
-		result := db.Where(&DeviceSetting{DeviceID: device.DeviceID}).First(&settings)
-		if result.Error != nil {
-			if result.Error == gorm.ErrRecordNotFound {
+		imageUpdate, err := processDeviceImageUpdate(db, cfg, &device, false)
+		if err != nil {
+			if err == gorm.ErrRecordNotFound {
 				c.JSON(http.StatusNotFound, errorResponse("Settings not found"))
 			} else {
-				log.Printf("Error fetching settings: %v", result.Error)
+				log.Printf("Error processing image update: %v", err)
 				c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
 			}
 			return
 		}
-		if device.UpdatedAt.Add(time.Duration(settings.ImgUpdateInterval)*time.Second).After(time.Now()) && device.CurrentImage != "" {
-			// If the last update time plus interval is less than current time, return no update message
+		if imageUpdate.NoUpdate {
 			c.JSON(http.StatusOK, successResponse(map[string]interface{}{
 				"message": "No image update needed",
 			}))
 			return
 		}
-		nextImage, err := getNextRandom(db, device)
-		if err != nil {
-			log.Printf("Error finding next random image:%v", err)
-			c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
-			return
-		}
-		ditheredImage, err := getDithered(db, nextImage, settings.Palette, settings.DitherAlgorithm, settings.DitherStrength, settings.Width, settings.Height, settings.ResizeMethod)
-		if err != nil {
-			log.Printf("Error getting dithered image: %v", err)
-			c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
-			return
-		}
-		ditheredImg, err := loadImage(ditheredImage.Path)
-		if err != nil {
-			log.Printf("Error loading dithered image: %v", err)
-			c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
-			return
-		}
-		ditheredImgBit := imgToBitmap(ditheredImg, settings.Palette, settings.Width, settings.Height)
-		//save dithered image to cache
-		print(len(ditheredImgBit))
-		filepaths := make([]string, len(ditheredImgBit))
-		for i := 0; i < len(ditheredImgBit); i++ {
-			bytes_data := BitsToBytes(ditheredImgBit[i])
-			filePath := fmt.Sprintf("%s/%s_%d.bin", cacheDir, ditheredImage.UUID, i)
-			err = saveBytesToFile(filePath, bytes_data)
-			if err != nil {
-				log.Printf("Error saving dithered image to file: %v", err)
-				c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
-				return
-			}
-			filepaths[i] = strings.Replace(filePath, cacheDir, "assets", 1)
-		}
-		// Update device's current image
-		device.CurrentImage = nextImage.UUID
-		device.UpdatedAt = time.Now()
-		db.Save(&device)
 
-		// Return the processed image or image data
 		c.JSON(http.StatusOK, successResponse(map[string]interface{}{
 			"message":    "Image updated",
-			"image_uuid": nextImage.UUID,
-			"image":      filepaths,
+			"image_uuid": imageUpdate.ImageUUID,
+			"image":      imageUpdate.Files,
 		}))
 		return
 	}
 	if requestData["action"] == "update_image" {
-		// Force update image without time check
-		var settings DeviceSetting
-		result := db.Where(&DeviceSetting{DeviceID: device.DeviceID}).First(&settings)
-		if result.Error != nil {
-			if result.Error == gorm.ErrRecordNotFound {
+		imageUpdate, err := processDeviceImageUpdate(db, cfg, &device, true)
+		if err != nil {
+			if err == gorm.ErrRecordNotFound {
 				c.JSON(http.StatusNotFound, errorResponse("Settings not found"))
 			} else {
-				log.Printf("Error fetching settings: %v", result.Error)
+				log.Printf("Error processing image update: %v", err)
 				c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
 			}
 			return
 		}
-
-		nextImage, err := getNextRandom(db, device)
-		if err != nil {
-			log.Printf("Error finding next random image: %v", err)
-			c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
-			return
-		}
-
-		ditheredImage, err := getDithered(db, nextImage, settings.Palette, settings.DitherAlgorithm,
-			settings.DitherStrength, settings.Width, settings.Height, settings.ResizeMethod)
-		if err != nil {
-			log.Printf("Error getting dithered image: %v", err)
-			c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
-			return
-		}
-
-		ditheredImg, err := loadImage(ditheredImage.Path)
-		if err != nil {
-			log.Printf("Error loading dithered image: %v", err)
-			c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
-			return
-		}
-
-		ditheredImgBit := imgToBitmap(ditheredImg, settings.Palette, settings.Width, settings.Height)
-		//save dithered image to cache
-		print(len(ditheredImgBit))
-		filepaths := make([]string, len(ditheredImgBit))
-		for i := 0; i < len(ditheredImgBit); i++ {
-			bytes_data := BitsToBytes(ditheredImgBit[i])
-			filePath := fmt.Sprintf("%s/%s_%d.bin", cacheDir, ditheredImage.UUID, i)
-			err = saveBytesToFile(filePath, bytes_data)
-			if err != nil {
-				log.Printf("Error saving dithered image to file: %v", err)
-				c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
-				return
-			}
-			filepaths[i] = strings.Replace(filePath, cacheDir, "assets", 1)
-		}
-		// Update device's current image
-		device.CurrentImage = nextImage.UUID
-		device.UpdatedAt = time.Now()
-		db.Save(&device)
 
 		c.JSON(http.StatusOK, successResponse(map[string]interface{}{
 			"message":    "Image updated",
-			"image_uuid": nextImage.UUID,
-			"image":      filepaths,
+			"image_uuid": imageUpdate.ImageUUID,
+			"image":      imageUpdate.Files,
 		}))
 		return
 	}

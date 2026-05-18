@@ -7,6 +7,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/HighDoping/EinkPhotoFrame/config"
+
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -54,8 +56,8 @@ func dbClose(db *gorm.DB) error {
 	}
 	return nil
 }
-func refreshImages(db *gorm.DB) error {
-	imagePaths, err := generateFileList(imageDir, []string{".jpg", ".jpeg", ".png", ".bmp"})
+func refreshImages(db *gorm.DB, cfg config.Config) error {
+	imagePaths, err := generateFileList(cfg.ImageDir, []string{".jpg", ".jpeg", ".png", ".bmp"})
 	if err != nil {
 		return fmt.Errorf("failed to generate file list: %w", err)
 	}
@@ -113,13 +115,13 @@ func refreshImages(db *gorm.DB) error {
 	return nil
 }
 
-func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32, targetWidth int, targetHeight int, resizeMethod string) (DitheredImage, error) {
+func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32, targetWidth int, targetHeight int, resizeMethod string, cfg config.Config) (DitheredImage, error) {
 	if db == nil {
 		return DitheredImage{}, fmt.Errorf("database connection is nil")
 	}
 	// Generate path for dithered image
 	uuid := generateUUID()
-	path := fmt.Sprintf("%s/dithered_%s.png", cacheDir, uuid)
+	path := fmt.Sprintf("%s/dithered_%s.png", cfg.CacheDir, uuid)
 	img := fetchAndDither(image.Path, palette, ditherAlgorithm, ditherStrength, targetWidth, targetHeight, resizeMethod)
 	if img == nil {
 		return DitheredImage{}, fmt.Errorf("failed to dither image: %s", image.Path)
@@ -154,7 +156,7 @@ func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm str
 
 }
 
-func getDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32, targetWidth int, targetHeight int, resizeMethod string) (DitheredImage, error) {
+func getDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32, targetWidth int, targetHeight int, resizeMethod string, cfg config.Config) (DitheredImage, error) {
 	if db == nil {
 		return DitheredImage{}, fmt.Errorf("database connection is nil")
 	}
@@ -175,7 +177,7 @@ func getDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm str
 	if result.Error != nil {
 		if result.Error == gorm.ErrRecordNotFound {
 			// Dithered image not found, create it
-			dithered, err := addDithered(db, image, palette, ditherAlgorithm, ditherStrength, targetWidth, targetHeight, resizeMethod)
+			dithered, err := addDithered(db, image, palette, ditherAlgorithm, ditherStrength, targetWidth, targetHeight, resizeMethod, cfg)
 			if err != nil {
 				return DitheredImage{}, fmt.Errorf("failed to create dithered image: %w", err)
 			}

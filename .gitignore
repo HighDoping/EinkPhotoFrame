@@ -1,2 +1,5 @@
-server/cache
+server/server
 .go_cache
+dev_data
+.env
+db.db

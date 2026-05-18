@@ -23,7 +23,7 @@ func loadImage(path string) (image.Image, error) {
 	return img, nil
 }
 
-func saveImage( path string,img image.Image) error {
+func saveImage(path string, img image.Image) error {
 	// Save the image to the specified path using PNG format
 	encoder := imgio.PNGEncoder()
 	if err := imgio.Save(path, img, encoder); err != nil {
@@ -114,69 +114,69 @@ func resizeImage(img image.Image, width, height int, filter string, method strin
 }
 
 func BytesToBits(data []byte) []bool {
-    bits := make([]bool, 0, len(data)*8)
-    for _, b := range data {
-        for i := 7; i >= 0; i-- {
-            bits = append(bits, (b&(1<<i)) != 0)
-        }
-    }
-    return bits
+	bits := make([]bool, 0, len(data)*8)
+	for _, b := range data {
+		for i := 7; i >= 0; i-- {
+			bits = append(bits, (b&(1<<i)) != 0)
+		}
+	}
+	return bits
 }
 
 func BitsToBytes(bits []bool) []byte {
-    if len(bits)%8 != 0 {
-        panic("Bit slice length must be a multiple of 8")
-    }
+	if len(bits)%8 != 0 {
+		panic("Bit slice length must be a multiple of 8")
+	}
 
-    bytes := make([]byte, len(bits)/8)
-    for i := 0; i < len(bits); i += 8 {
-        var b byte
-        for j := 0; j < 8; j++ {
-            if bits[i+j] {
-                b |= 1 << (7 - j)
-            }
-        }
-        bytes[i/8] = b
-    }
-    return bytes
+	bytes := make([]byte, len(bits)/8)
+	for i := 0; i < len(bits); i += 8 {
+		var b byte
+		for j := 0; j < 8; j++ {
+			if bits[i+j] {
+				b |= 1 << (7 - j)
+			}
+		}
+		bytes[i/8] = b
+	}
+	return bytes
 }
-func generateFileList(folder string,file_ext []string) ([]string, error) {
-    files, err := os.ReadDir(folder)
-    if err != nil {
-        return nil, err
-    }
-    var fileList []string
-    for _, file := range files {
-        if !file.IsDir() {
-            for _, ext := range file_ext {
+func generateFileList(folder string, file_ext []string) ([]string, error) {
+	files, err := os.ReadDir(folder)
+	if err != nil {
+		return nil, err
+	}
+	var fileList []string
+	for _, file := range files {
+		if !file.IsDir() {
+			for _, ext := range file_ext {
 				if strings.HasSuffix(strings.ToLower(file.Name()), strings.ToLower(ext)) {
-                    fileList = append(fileList, filepath.Join(folder, file.Name()))
-                    break
-                }
-            }
-        }
-    }
-    return fileList, nil
+					fileList = append(fileList, filepath.Join(folder, file.Name()))
+					break
+				}
+			}
+		}
+	}
+	return fileList, nil
 }
 func saveBytesToFile(filename string, data []byte) error {
-    file, err := os.Create(filename)
-    if err != nil {
-        return err
-    }
-    defer file.Close()
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
 
-    _, err = file.Write(data)
-    if err != nil {
-        return err
-    }
-    return nil
+	_, err = file.Write(data)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 func saveBytesToFileHex(filename string, data []byte) error {
-    file, err := os.Create(filename)
-    if err != nil {
-        return err
-    }
-    defer file.Close()
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
 
 	for i, b := range data {
 		if i > 0 && i%16 == 0 {

@@ -18,8 +18,13 @@ func dbInit() (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
+	// Older versions recorded a telemetry row for every request. Keep the most
+	// recent row before adding the one-row-per-device unique index.
+	if err := db.Exec("DELETE FROM device_telemetries WHERE id NOT IN (SELECT MAX(id) FROM device_telemetries GROUP BY device_id)").Error; err != nil {
+		return nil, fmt.Errorf("failed to consolidate telemetry: %w", err)
+	}
 	// Auto migrate schemas
-	err = db.AutoMigrate(&Device{}, &DeviceSetting{}, &DeviceTelemetry{}, &DBImage{}, &DitheredImage{}, &RandomImage{})
+	err = db.AutoMigrate(&Device{}, &DeviceSetting{}, &DeviceTelemetry{}, &DeviceImage{}, &DBImage{}, &DitheredImage{}, &RandomImage{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to migrate database schema: %w", err)
 	}
@@ -39,6 +44,14 @@ func dbInit() (*gorm.DB, error) {
 	}
 
 	return db, nil
+}
+
+func randomStartIndex(db *gorm.DB) uint {
+	var count int64
+	if err := db.Model(&RandomImage{}).Count(&count).Error; err != nil || count < 2 {
+		return 0
+	}
+	return uint(rand.Intn(int(count)))
 }
 func dbClose(db *gorm.DB) error {
 	if db == nil {
@@ -322,10 +335,14 @@ func getNextRandom(db *gorm.DB, device Device) (DBImage, error) {
 	var nextImage DBImage
 
 	if device.CurrentImage == "" {
-		// First time, get first random image
+		// Each device begins at its own randomly selected offset in the shared
+		// shuffled list. Subsequent updates follow that same list from there.
 		var firstRandom RandomImage
-		if err := db.Order("id ASC").First(&firstRandom).Error; err != nil {
-			return nextImage, fmt.Errorf("no images available")
+		if err := db.Order("id ASC").Offset(int(device.StartIndex)).First(&firstRandom).Error; err != nil {
+			// The image list can shrink after provisioning; wrap to its first item.
+			if err := db.Order("id ASC").First(&firstRandom).Error; err != nil {
+				return nextImage, fmt.Errorf("no images available")
+			}
 		}
 
 		if err := db.Where(&DBImage{UUID: firstRandom.UUID}).First(&nextImage).Error; err != nil {

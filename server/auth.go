@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"log"
 	"time"
@@ -12,21 +13,21 @@ import (
 
 func checkAdminKey(c *gin.Context, cfg config.Config) bool {
 	// Check if the request has a valid admin key.
-	tokenString := c.GetHeader("Authorization")
-	if tokenString == "" {
-		return false
-	}
-	tokenString = tokenString[len("Bearer "):]
-	return tokenString == cfg.AdminKey
+	tokenString, err := getBearerToken(c)
+	return err == nil && cfg.AdminKey != "" && subtle.ConstantTimeCompare([]byte(tokenString), []byte(cfg.AdminKey)) == 1
 }
 
 func updateLastSeen(device Device, db *gorm.DB) error {
-	// Update the last seen timestamp for the device.
-	deviceTelemetry := DeviceTelemetry{
-		DeviceID: device.DeviceID,
-		LastSeen: time.Now(),
+	// Maintain one current status row per device.
+	deviceTelemetry := DeviceTelemetry{DeviceID: device.DeviceID}
+	result := db.Where("device_id = ?", device.DeviceID).First(&deviceTelemetry)
+	if result.Error == gorm.ErrRecordNotFound {
+		deviceTelemetry.LastSeen = time.Now()
+		result = db.Create(&deviceTelemetry)
+	} else if result.Error == nil {
+		deviceTelemetry.LastSeen = time.Now()
+		result = db.Save(&deviceTelemetry)
 	}
-	result := db.Save(&deviceTelemetry)
 	if result.Error != nil {
 		log.Printf("Error updating last seen for device %s: %v", device.DeviceID, result.Error)
 		return result.Error
@@ -64,6 +65,9 @@ func authDevice(c *gin.Context, db *gorm.DB) (Device, error) {
 	}
 	if device.DeviceID == "" {
 		return Device{}, fmt.Errorf("device not found")
+	}
+	if !device.Enabled {
+		return Device{}, fmt.Errorf("device is disabled")
 	}
 	log.Printf("Device authenticated: %s (%s)", device.DeviceID, device.DeviceName)
 

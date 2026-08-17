@@ -15,6 +15,8 @@ type Device struct {
 	DeviceID     string `gorm:"uniqueIndex;not null"`
 	DeviceName   string `gorm:"not null"`
 	DeviceToken  string `gorm:"unique"`
+	Enabled      bool   `gorm:"not null;default:true"`
+	StartIndex   uint   `gorm:"not null;default:0"`
 	CurrentImage string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -38,10 +40,22 @@ type DeviceSetting struct {
 
 type DeviceTelemetry struct {
 	ID           uint      `gorm:"primarykey"`
-	DeviceID     string    `gorm:"not null"`
+	DeviceID     string    `gorm:"uniqueIndex;not null"`
 	BatteryLevel int       `gorm:"not null;default:100"`
 	LastSeen     time.Time `gorm:"not null;default:CURRENT_TIMESTAMP"`
 	Device       Device    `gorm:"foreignKey:DeviceID;references:DeviceID"`
+}
+
+// DeviceImage authorizes one generated asset for exactly one device.
+type DeviceImage struct {
+	ID        uint   `gorm:"primarykey"`
+	AssetUUID string `gorm:"uniqueIndex;not null"`
+	DeviceID  string `gorm:"index;not null"`
+	ImageUUID string `gorm:"index;not null"`
+	FileIndex int    `gorm:"not null"`
+	Path      string `gorm:"uniqueIndex;not null"`
+	CreatedAt time.Time
+	Device    Device `gorm:"foreignKey:DeviceID;references:DeviceID"`
 }
 
 type DBImage struct {

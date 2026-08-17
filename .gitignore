@@ -3,3 +3,7 @@ server/server
 dev_data
 .env
 db.db
+.pio/
+arduino/certs/downloaded_ca.pem
+arduino/firmware/x509_crt_bundle.h
+.vscode

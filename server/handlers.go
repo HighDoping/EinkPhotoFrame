@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/HighDoping/EinkPhotoFrame/config"
@@ -27,7 +28,7 @@ func errorResponse(message string) APIResponse {
 }
 
 func handleRegisterRequest(c *gin.Context, db *gorm.DB) error {
-	// Register a new device if authorized in database, returns a JWT token
+	// Enroll a device that was explicitly pre-registered by an administrator.
 	var requestData map[string]interface{}
 	if err := c.BindJSON(&requestData); err != nil {
 		c.JSON(http.StatusBadRequest, errorResponse("Invalid JSON"))
@@ -39,18 +40,38 @@ func handleRegisterRequest(c *gin.Context, db *gorm.DB) error {
 		return fmt.Errorf("device_id is required")
 	}
 	deviceName, ok := requestData["device_name"].(string)
-	if !ok || deviceName == "" {
-		deviceName = deviceID // Use device_id as default name if not provided
+	if !ok || strings.TrimSpace(deviceName) == "" {
+		c.JSON(http.StatusBadRequest, errorResponse("device_name is required"))
+		return fmt.Errorf("device_name is required")
+	}
+	deviceID = strings.TrimSpace(deviceID)
+	deviceName = strings.TrimSpace(deviceName)
+	width, widthOK := requestData["width"].(float64)
+	height, heightOK := requestData["height"].(float64)
+	if !widthOK || !heightOK || width < 1 || height < 1 || width != float64(int(width)) || height != float64(int(height)) {
+		c.JSON(http.StatusBadRequest, errorResponse("valid width and height are required"))
+		return fmt.Errorf("invalid device dimensions")
 	}
 	// Check if device already exists
 	var existingDevice Device
-	result := db.Where(&Device{DeviceID: deviceID, DeviceName: deviceName}).First(&existingDevice)
+	// Device names are managed by the administrator and may differ from the
+	// firmware's configured name. Authorization is based on the immutable ID.
+	result := db.Where(&Device{DeviceID: deviceID}).First(&existingDevice)
 	if result.Error != nil && result.Error != gorm.ErrRecordNotFound {
 		log.Printf("Error checking existing device: %v", result.Error)
 		c.JSON(http.StatusInternalServerError, errorResponse("Internal server error"))
 		return result.Error
 	}
 	if result.RowsAffected > 0 {
+		if !existingDevice.Enabled {
+			c.JSON(http.StatusUnauthorized, errorResponse("Device enrollment is disabled"))
+			return fmt.Errorf("device enrollment disabled")
+		}
+		if existingDevice.DeviceName != deviceName {
+			c.JSON(http.StatusUnauthorized, errorResponse("Unauthorized device registration"))
+			log.Printf("Registration name mismatch for device: %s", deviceID)
+			return fmt.Errorf("device name mismatch")
+		}
 		// Device already exists, check if has settings, if not create default settings
 		var settings DeviceSetting
 		result = db.Where(&DeviceSetting{DeviceID: deviceID}).First(&settings)
@@ -72,6 +93,13 @@ func handleRegisterRequest(c *gin.Context, db *gorm.DB) error {
 				return result.Error
 			}
 			log.Printf("Created default settings for device: %s", deviceID)
+		}
+		// Dimensions come from the device firmware and are not admin-controlled.
+		settings.Width = int(width)
+		settings.Height = int(height)
+		if err := db.Save(&settings).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, errorResponse("Unable to save device dimensions"))
+			return err
 		}
 		//create bearer token
 		tokenString := generateUUID()
@@ -103,18 +131,13 @@ func handleAdminDeviceRegisterRequest(c *gin.Context, db *gorm.DB, cfg config.Co
 		c.JSON(http.StatusUnauthorized, errorResponse("Unauthorized access"))
 		return // Unauthorized access
 	}
-	var requestData map[string]interface{}
-	if err := c.BindJSON(&requestData); err != nil {
-		c.JSON(http.StatusBadRequest, errorResponse("Invalid JSON"))
-		return
-	}
-	// Process the request data as needed
-	device_id := requestData["device_id"].(string)
-	device_name := requestData["device_name"].(string)
-	if device_id == "" || device_name == "" {
+	var requestData createDeviceRequest
+	if err := c.ShouldBindJSON(&requestData); err != nil || strings.TrimSpace(requestData.DeviceID) == "" || strings.TrimSpace(requestData.DeviceName) == "" {
 		c.JSON(http.StatusBadRequest, errorResponse("device_id and device_name are required"))
 		return
 	}
+	device_id := strings.TrimSpace(requestData.DeviceID)
+	device_name := strings.TrimSpace(requestData.DeviceName)
 
 	// Check if the device_id already exists in the database
 	var existingDevice Device
@@ -134,6 +157,8 @@ func handleAdminDeviceRegisterRequest(c *gin.Context, db *gorm.DB, cfg config.Co
 	device := Device{
 		DeviceID:   device_id,
 		DeviceName: device_name,
+		Enabled:    true,
+		StartIndex: randomStartIndex(db),
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
 	}
@@ -201,12 +226,6 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB, cfg config.Config) {
 		// Update settings with request data
 		if imgUpdateInterval, ok := requestData["img_update_interval"].(int); ok {
 			settings.ImgUpdateInterval = imgUpdateInterval
-		}
-		if height, ok := requestData["height"].(int); ok {
-			settings.Height = height
-		}
-		if width, ok := requestData["width"].(int); ok {
-			settings.Width = width
 		}
 		if rotation, ok := requestData["rotation"].(int); ok {
 			settings.Rotation = rotation

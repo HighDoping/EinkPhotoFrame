@@ -28,10 +28,8 @@ func LoadFromEnv() Config {
 
 	cfg.AdminKey = os.Getenv("ADMIN_KEY")
 	if cfg.AdminKey == "" {
-		log.Println("Warning: ADMIN_TOKEN not set in .env, using default (not secure for production)")
-		cfg.AdminKey = "default_admin_token"
+		log.Println("Warning: ADMIN_KEY is not set; admin API is disabled")
 	}
-	log.Println("Using admin token:", cfg.AdminKey)
 
 	cfg.ImageDir = os.Getenv("IMAGE_DIR")
 	if cfg.ImageDir == "" {

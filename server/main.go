@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"log"
 	"net/http"
 
@@ -10,24 +11,28 @@ import (
 	"gorm.io/gorm"
 )
 
+//go:embed admin.html
+var adminPage []byte
+
 func startAPIServer(db *gorm.DB, cfg config.Config) {
 	router := gin.Default()
 
-	// Use closures to pass the db connection to handlers
-	// Serve static files with authentication
-	router.GET("/assets/*filepath", func(c *gin.Context) {
-		// Check authentication first
+	// Generated assets are private and may only be read by their assignee.
+	router.GET("/assets/:assetUUID", func(c *gin.Context) {
 		device, err := authDevice(c, db)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, errorResponse("Unauthorized access to assets"))
 			return
 		}
 
-		// If authenticated, serve the requested file
-		path := c.Param("filepath")
-		c.File(cfg.CacheDir + path)
+		var assignment DeviceImage
+		if err := db.Where("asset_uuid = ? AND device_id = ?", c.Param("assetUUID"), device.DeviceID).First(&assignment).Error; err != nil {
+			c.JSON(http.StatusNotFound, errorResponse("Asset not available for this device"))
+			return
+		}
+		c.File(assignment.Path)
 
-		log.Printf("Device %s (%s) accessed asset: %s", device.DeviceID, device.DeviceName, path)
+		log.Printf("Device %s (%s) accessed assigned asset: %s", device.DeviceID, device.DeviceName, assignment.AssetUUID)
 	})
 
 	router.POST("/register", func(c *gin.Context) {
@@ -39,12 +44,22 @@ func startAPIServer(db *gorm.DB, cfg config.Config) {
 	})
 
 	router.POST("/admin/device_register", func(c *gin.Context) {
-		// Admin endpoint, can be used for management tasks
+		// Backwards-compatible JSON endpoint for provisioning devices.
 		handleAdminDeviceRegisterRequest(c, db, cfg)
 	})
 
+	router.GET("/admin", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", adminPage) })
+	admin := router.Group("/admin/api", requireAdmin(cfg))
+	admin.GET("/devices", func(c *gin.Context) { handleAdminDevices(c, db) })
+	admin.POST("/devices", func(c *gin.Context) { handleAdminCreateDevice(c, db) })
+	admin.PATCH("/devices/:deviceID", func(c *gin.Context) { handleAdminUpdateDevice(c, db) })
+	admin.POST("/devices/:deviceID/revoke", func(c *gin.Context) { handleAdminRevokeDevice(c, db) })
+	admin.POST("/devices/:deviceID/enable", func(c *gin.Context) { handleAdminEnableDevice(c, db) })
+	admin.DELETE("/devices/:deviceID", func(c *gin.Context) { handleAdminDeleteDevice(c, db) })
+	admin.POST("/devices/:deviceID/reset-image", func(c *gin.Context) { handleAdminResetDeviceImage(c, db) })
+
 	log.Println("Starting API server on port 8080...")
-	log.Fatal(router.RunTLS(":8080",cfg.CertFile, cfg.KeyFile))
+	log.Fatal(router.RunTLS(":8080", cfg.CertFile, cfg.KeyFile))
 }
 
 func main() {

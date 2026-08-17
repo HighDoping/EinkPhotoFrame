@@ -7,8 +7,9 @@
 #include <GxEPD2_7C.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
-#include <x509_crt_bundle.h>
+#include "x509_crt_bundle.h"
 #include "esp_mac.h"
+#include "driver/gpio.h"
 
 Preferences preferences;
 
@@ -16,25 +17,25 @@ const String DEVICE_NAME = "DEADBEEF";
 const int DEVICE_WIDTH = 800;
 const int DEVICE_HEIGHT = 480;
 const int COLORS = 7;                              // Number of colors supported by the display
-const String SERVER_URL = "https://10.0.0.4:8080"; // Replace with your server URL
+const String SERVER_URL = "https://mac.home.arpa:8080"; // Replace with your server URL
 const char *RESET_PASSWD = "password";             // Password to reset WiFi settings
 const char *CONFIG_NAME = "PhotoFrame";
 const char *TIME_SERVER = "10.0.0.1"; //NTP Server
 
 // --- Sleep Parameters ---
 #define uS_TO_S_FACTOR 1000000ULL // Conversion factor for micro seconds to seconds
-#define TIME_TO_SLEEP 120         // Sleep time in seconds (adjust as needed)
+#define TIME_TO_SLEEP 30         // Sleep time in seconds (adjust as needed)
 
 // Device specific settings
 const int TOUCH_PIN = 2; // Replace with the actual touch pin number
 const int TOUCH_THRESHOLD = 40;
 // Custom E-ink Adapter Board
-const int SDI = 4;
-const int CLK = 5;
-const int CS = 6;
-const int DC = 7;
-const int RES = 15;
-const int BUSY_PIN = 16;
+const int SDI = 14;
+const int CLK = 13;
+const int CS = 12;
+const int DC = 11;
+const int RES = 10;
+const int BUSY_PIN = 9;
 
 const int SDO = 17; // NC
 
@@ -69,7 +70,11 @@ void enableOutput()
 
 void setup()
 {
-  // put your setup code here, to run once:
+  // GPIO hold persists through deep sleep; release the WS2812 data pin after
+  // wake so it remains available for normal RGB LED use.
+  gpio_deep_sleep_hold_dis();
+  gpio_hold_dis(GPIO_NUM_48);
+
   Serial.begin(115200);
   enableOutput();
 
@@ -128,6 +133,14 @@ void goToSleep()
 {
   Serial.println("Configuring deep sleep...");
 
+  // The ESP32-S3-DevKitC-1 WS2812 data line is GPIO48. Latch an off frame and
+  // hold the line low throughout deep sleep so the LED cannot retain a color.
+  rgbLedWrite(RGB_BUILTIN, 0, 0, 0);
+  pinMode(PIN_RGB_LED, OUTPUT);
+  digitalWrite(PIN_RGB_LED, LOW);
+  gpio_hold_en(GPIO_NUM_48);
+  gpio_deep_sleep_hold_en();
+
   // Configure wakeup sources
   esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
   touchSleepWakeUpEnable(TOUCH_PIN, TOUCH_THRESHOLD); // NULL = no ISR, only for deep sleep wake
@@ -179,6 +192,10 @@ void connect_wifi()
     if (WiFi.status() == WL_CONNECTED)
     {
       Serial.printf("Successfully connected to %s\n", savedSSID.c_str());
+      Serial.printf("IP: %s, gateway: %s, DNS: %s\n",
+        WiFi.localIP().toString().c_str(),
+        WiFi.gatewayIP().toString().c_str(),
+        WiFi.dnsIP(0).toString().c_str());
       start_up();
       return;
     }
@@ -201,7 +218,7 @@ void connect_wifi()
   // Set the success callback
   provisioner
       .onInputCheck([](const char *input) -> bool
-                    { return strcmp(input, RESET_PASSWD); })
+                    { return strcmp(input, RESET_PASSWD)==0; })
       .onFactoryReset([]()
                       {
         preferences.begin(CONFIG_NAME, false);
@@ -255,6 +272,8 @@ bool register_device()
   JsonDocument doc;
   doc["device_name"] = DEVICE_NAME;
   doc["device_id"] = getMacAddress();
+  doc["width"] = DEVICE_WIDTH;
+  doc["height"] = DEVICE_HEIGHT;
   String jsonPayload;
   serializeJson(doc, jsonPayload);
 
@@ -289,7 +308,7 @@ bool register_device()
   preferences.begin(CONFIG_NAME, false);
   preferences.putString("bearer_token", bearer_token);
   preferences.end();
-  Serial.println("Bearer token saved: " + bearer_token);
+  Serial.println("Bearer token saved.");
   return true; // Registration successful
 }
 

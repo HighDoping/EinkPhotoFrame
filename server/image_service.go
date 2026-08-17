@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/HighDoping/EinkPhotoFrame/config"
@@ -46,12 +45,17 @@ func processDeviceImageUpdate(db *gorm.DB, cfg config.Config, device *Device, fo
 	filepaths := make([]string, len(ditheredImgBit))
 	for i := 0; i < len(ditheredImgBit); i++ {
 		bytesData := BitsToBytes(ditheredImgBit[i])
-		filePath := fmt.Sprintf("%s/%s_%d.bin", cfg.CacheDir, ditheredImage.UUID, i)
+		assetUUID := generateUUID()
+		filePath := fmt.Sprintf("%s/%s.bin", cfg.CacheDir, assetUUID)
 		err = saveBytesToFile(filePath, bytesData)
 		if err != nil {
 			return imageUpdateResult{}, err
 		}
-		filepaths[i] = strings.Replace(filePath, cfg.CacheDir, "assets", 1)
+		assignment := DeviceImage{AssetUUID: assetUUID, DeviceID: device.DeviceID, ImageUUID: nextImage.UUID, FileIndex: i, Path: filePath}
+		if err := db.Create(&assignment).Error; err != nil {
+			return imageUpdateResult{}, err
+		}
+		filepaths[i] = "assets/" + assetUUID
 	}
 
 	device.CurrentImage = nextImage.UUID

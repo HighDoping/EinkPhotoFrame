@@ -30,7 +30,7 @@ func processDeviceImageUpdate(db *gorm.DB, cfg config.Config, device *Device, fo
 		return imageUpdateResult{}, err
 	}
 
-	ditheredImage, err := getDithered(db, nextImage, settings.Palette, settings.DitherAlgorithm, settings.DitherStrength, settings.Width, settings.Height, settings.ResizeMethod, cfg)
+	ditheredImage, err := getDithered(db, nextImage, settings.Palette, settings.DitherAlgorithm, settings.DitherStrength, settings.AutoBrightness, settings.AutoContrast, settings.Width, settings.Height, settings.ResizeMethod, cfg)
 	if err != nil {
 		return imageUpdateResult{}, err
 	}

@@ -51,6 +51,7 @@ func startAPIServer(db *gorm.DB, cfg config.Config) {
 	router.GET("/admin", func(c *gin.Context) { c.Data(http.StatusOK, "text/html; charset=utf-8", adminPage) })
 	admin := router.Group("/admin/api", requireAdmin(cfg))
 	admin.GET("/devices", func(c *gin.Context) { handleAdminDevices(c, db) })
+	admin.GET("/devices/:deviceID/current-image", func(c *gin.Context) { handleAdminCurrentImage(c, db) })
 	admin.POST("/devices", func(c *gin.Context) { handleAdminCreateDevice(c, db) })
 	admin.PATCH("/devices/:deviceID", func(c *gin.Context) { handleAdminUpdateDevice(c, db) })
 	admin.POST("/devices/:deviceID/revoke", func(c *gin.Context) { handleAdminRevokeDevice(c, db) })

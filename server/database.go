@@ -128,14 +128,14 @@ func refreshImages(db *gorm.DB, cfg config.Config) error {
 	return nil
 }
 
-func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32, targetWidth int, targetHeight int, resizeMethod string, cfg config.Config) (DitheredImage, error) {
+func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32, autoBrightness bool, autoContrast bool, targetWidth int, targetHeight int, resizeMethod string, cfg config.Config) (DitheredImage, error) {
 	if db == nil {
 		return DitheredImage{}, fmt.Errorf("database connection is nil")
 	}
 	// Generate path for dithered image
 	uuid := generateUUID()
 	path := fmt.Sprintf("%s/dithered_%s.png", cfg.CacheDir, uuid)
-	img := fetchAndDither(image.Path, palette, ditherAlgorithm, ditherStrength, targetWidth, targetHeight, resizeMethod)
+	img := fetchAndDither(image.Path, palette, ditherAlgorithm, ditherStrength, autoBrightness, autoContrast, targetWidth, targetHeight, resizeMethod)
 	if img == nil {
 		return DitheredImage{}, fmt.Errorf("failed to dither image: %s", image.Path)
 	}
@@ -146,17 +146,20 @@ func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm str
 	}
 
 	dithered := DitheredImage{
-		UUID:            uuid,
-		DBImageUUID:     image.UUID,
-		Palette:         palette,
-		DitherAlgorithm: ditherAlgorithm,
-		DitherStrength:  ditherStrength,
-		Height:          targetHeight,
-		Width:           targetWidth,
-		ResizeMethod:    resizeMethod,
-		CreatedAt:       time.Now(),
-		UpdatedAt:       time.Now(),
-		Path:            path,
+		UUID:              uuid,
+		DBImageUUID:       image.UUID,
+		ProcessingVersion: ditherProcessingVersion,
+		Palette:           palette,
+		DitherAlgorithm:   ditherAlgorithm,
+		DitherStrength:    ditherStrength,
+		AutoBrightness:    autoBrightness,
+		AutoContrast:      autoContrast,
+		Height:            targetHeight,
+		Width:             targetWidth,
+		ResizeMethod:      resizeMethod,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+		Path:              path,
 	}
 
 	result := db.Create(&dithered)
@@ -169,7 +172,7 @@ func addDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm str
 
 }
 
-func getDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32, targetWidth int, targetHeight int, resizeMethod string, cfg config.Config) (DitheredImage, error) {
+func getDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm string, ditherStrength float32, autoBrightness bool, autoContrast bool, targetWidth int, targetHeight int, resizeMethod string, cfg config.Config) (DitheredImage, error) {
 	if db == nil {
 		return DitheredImage{}, fmt.Errorf("database connection is nil")
 	}
@@ -177,20 +180,23 @@ func getDithered(db *gorm.DB, image DBImage, palette string, ditherAlgorithm str
 	// Check if dithered image already exists
 	var dithered DitheredImage
 	result := db.Where(&DitheredImage{
-		DBImageUUID:     image.UUID,
-		Palette:         palette,
-		DitherAlgorithm: ditherAlgorithm,
-		DitherStrength:  ditherStrength,
-		Width:           targetWidth,
-		Height:          targetHeight,
-		ResizeMethod:    resizeMethod,
+		DBImageUUID:       image.UUID,
+		ProcessingVersion: ditherProcessingVersion,
+		Palette:           palette,
+		DitherAlgorithm:   ditherAlgorithm,
+		DitherStrength:    ditherStrength,
+		AutoBrightness:    autoBrightness,
+		AutoContrast:      autoContrast,
+		Width:             targetWidth,
+		Height:            targetHeight,
+		ResizeMethod:      resizeMethod,
 	}).First(&dithered)
 
 	// If not found, create it
 	if result.Error != nil {
 		if result.Error == gorm.ErrRecordNotFound {
 			// Dithered image not found, create it
-			dithered, err := addDithered(db, image, palette, ditherAlgorithm, ditherStrength, targetWidth, targetHeight, resizeMethod, cfg)
+			dithered, err := addDithered(db, image, palette, ditherAlgorithm, ditherStrength, autoBrightness, autoContrast, targetWidth, targetHeight, resizeMethod, cfg)
 			if err != nil {
 				return DitheredImage{}, fmt.Errorf("failed to create dithered image: %w", err)
 			}

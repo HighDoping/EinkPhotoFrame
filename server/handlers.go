@@ -239,6 +239,12 @@ func handleDeviceRequest(c *gin.Context, db *gorm.DB, cfg config.Config) {
 		if ditherStrength, ok := requestData["dither_strength"].(float32); ok {
 			settings.DitherStrength = ditherStrength
 		}
+		if autoBrightness, ok := requestData["auto_brightness"].(bool); ok {
+			settings.AutoBrightness = autoBrightness
+		}
+		if autoContrast, ok := requestData["auto_contrast"].(bool); ok {
+			settings.AutoContrast = autoContrast
+		}
 		if resizeMethod, ok := requestData["resize_method"].(string); ok {
 			settings.ResizeMethod = resizeMethod
 		}

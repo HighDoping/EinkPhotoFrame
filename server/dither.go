@@ -8,6 +8,16 @@ import (
 	"github.com/makeworld-the-better-one/dither/v2"
 )
 
+const (
+	ditherProcessingVersion = 2
+
+	// Ignore a small number of extreme pixels so that specular highlights and
+	// deep shadows do not prevent a useful adjustment.
+	autoLevelsPercentile = 1
+	maxAutoContrast      = 1.35
+	maxAutoBrightness    = 20.0
+)
+
 var palettes = map[string][]color.Color{
 	"7Standard": {
 		color.RGBA{0, 0, 0, 255},       // Black
@@ -65,7 +75,7 @@ var ordered_dither_algo = map[string]dither.OrderedDitherMatrix{
 	"Vertical5x3":                dither.Vertical5x3,
 }
 
-func fetchAndDither(file string, selectedPalette string, selectedDitherAlgorithm string, ditherStrength float32, targetWidth int, targetHeight int, resizeMethod string) image.Image {
+func fetchAndDither(file string, selectedPalette string, selectedDitherAlgorithm string, ditherStrength float32, autoBrightness bool, autoContrast bool, targetWidth int, targetHeight int, resizeMethod string) image.Image {
 
 	// Define default options
 	if selectedPalette == "" {
@@ -94,9 +104,104 @@ func fetchAndDither(file string, selectedPalette string, selectedDitherAlgorithm
 	}
 	//resize the image to 800x480
 	img = resizeImage(img, targetWidth, targetHeight, "Lanczos", resizeMethod)
+	img = autoLevels(img, autoBrightness, autoContrast)
 
 	img = d.Dither(img)
 	return img
+}
+
+// autoLevels gently expands the luminance range before dithering. E-ink
+// palettes have relatively few tones, so this preserves detail in otherwise
+// flat or slightly underexposed photos without aggressively clipping them.
+// The same adjustment is applied to every RGB channel to retain color balance.
+func autoLevels(img image.Image, autoBrightness bool, autoContrast bool) image.Image {
+	if !autoBrightness && !autoContrast {
+		return img
+	}
+	bounds := img.Bounds()
+	pixelCount := bounds.Dx() * bounds.Dy()
+	if pixelCount == 0 {
+		return img
+	}
+
+	var histogram [256]int
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			luminance := (54*int(r>>8) + 183*int(g>>8) + 19*int(b>>8)) >> 8
+			histogram[luminance]++
+		}
+	}
+
+	clipCount := pixelCount * autoLevelsPercentile / 100
+	low := percentileFromHistogram(histogram, clipCount)
+	high := percentileFromHistogram(histogram, pixelCount-clipCount-1)
+	if high <= low {
+		return img
+	}
+
+	contrast := 1.0
+	if autoContrast {
+		contrast = minFloat(maxAutoContrast, 220.0/float64(high-low))
+	}
+	if contrast < 1 {
+		contrast = 1
+	}
+	brightness := 0.0
+	if autoBrightness {
+		brightness = 127.5 - contrast*float64(low+high)/2
+		if brightness > maxAutoBrightness {
+			brightness = maxAutoBrightness
+		} else if brightness < -maxAutoBrightness {
+			brightness = -maxAutoBrightness
+		}
+	}
+	if contrast == 1 && brightness == 0 {
+		return img
+	}
+
+	adjusted := image.NewNRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+			adjusted.SetNRGBA(x, y, color.NRGBA{
+				R: adjustLevel(uint8(r>>8), contrast, brightness),
+				G: adjustLevel(uint8(g>>8), contrast, brightness),
+				B: adjustLevel(uint8(b>>8), contrast, brightness),
+				A: uint8(a >> 8),
+			})
+		}
+	}
+	return adjusted
+}
+
+func percentileFromHistogram(histogram [256]int, target int) int {
+	seen := 0
+	for value, count := range histogram {
+		seen += count
+		if seen > target {
+			return value
+		}
+	}
+	return 255
+}
+
+func adjustLevel(value uint8, contrast, brightness float64) uint8 {
+	adjusted := contrast*float64(value) + brightness
+	if adjusted <= 0 {
+		return 0
+	}
+	if adjusted >= 255 {
+		return 255
+	}
+	return uint8(adjusted + 0.5)
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func imgToBitmap(img image.Image, selectedPalette string, targetWidth int, targetHeight int) [][]bool {

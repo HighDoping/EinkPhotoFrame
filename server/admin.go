@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,12 +17,17 @@ type adminDevice struct {
 	Authorized   bool            `json:"authorized"`
 	Enabled      bool            `json:"enabled"`
 	StartIndex   uint            `json:"start_index"`
-	CurrentImage string          `json:"current_image"`
+	CurrentImage *adminImage     `json:"current_image"`
 	AssetCount   int64           `json:"asset_count"`
 	CreatedAt    time.Time       `json:"created_at"`
 	UpdatedAt    time.Time       `json:"updated_at"`
 	Telemetry    DeviceTelemetry `json:"telemetry"`
 	Settings     DeviceSetting   `json:"settings"`
+}
+
+type adminImage struct {
+	UUID string `json:"uuid"`
+	Name string `json:"name"`
 }
 
 type createDeviceRequest struct {
@@ -54,13 +60,37 @@ func handleAdminDevices(c *gin.Context, db *gorm.DB) {
 
 	result := make([]adminDevice, 0, len(devices))
 	for _, device := range devices {
-		entry := adminDevice{DeviceID: device.DeviceID, DeviceName: device.DeviceName, Authorized: device.DeviceToken != "", Enabled: device.Enabled, StartIndex: device.StartIndex, CurrentImage: device.CurrentImage, CreatedAt: device.CreatedAt, UpdatedAt: device.UpdatedAt}
+		entry := adminDevice{DeviceID: device.DeviceID, DeviceName: device.DeviceName, Authorized: device.DeviceToken != "", Enabled: device.Enabled, StartIndex: device.StartIndex, CreatedAt: device.CreatedAt, UpdatedAt: device.UpdatedAt}
+		if device.CurrentImage != "" {
+			var current DBImage
+			if err := db.Where("uuid = ?", device.CurrentImage).First(&current).Error; err == nil {
+				entry.CurrentImage = &adminImage{UUID: current.UUID, Name: filepath.Base(current.Path)}
+			}
+		}
 		db.Where("device_id = ?", device.DeviceID).First(&entry.Settings)
 		db.Where("device_id = ?", device.DeviceID).First(&entry.Telemetry)
 		db.Model(&DeviceImage{}).Where("device_id = ?", device.DeviceID).Count(&entry.AssetCount)
 		result = append(result, entry)
 	}
 	c.JSON(http.StatusOK, successResponse(map[string]interface{}{"devices": result}))
+}
+
+func handleAdminCurrentImage(c *gin.Context, db *gorm.DB) {
+	var device Device
+	if err := db.Where("device_id = ?", c.Param("deviceID")).First(&device).Error; err != nil {
+		c.JSON(http.StatusNotFound, errorResponse("Device not found"))
+		return
+	}
+	if device.CurrentImage == "" {
+		c.JSON(http.StatusNotFound, errorResponse("No image is currently assigned"))
+		return
+	}
+	var current DBImage
+	if err := db.Where("uuid = ?", device.CurrentImage).First(&current).Error; err != nil {
+		c.JSON(http.StatusNotFound, errorResponse("Current image is no longer available"))
+		return
+	}
+	c.File(current.Path)
 }
 
 func handleAdminCreateDevice(c *gin.Context, db *gorm.DB) {

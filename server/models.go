@@ -23,27 +23,29 @@ type Device struct {
 }
 
 type DeviceSetting struct {
-	ID                uint    `gorm:"primarykey"`
-	DeviceID          string  `gorm:"not null"`
-	ImgUpdateInterval int     `gorm:"not null;default:600"`
-	Height            int     `gorm:"not null;default:480"`
-	Width             int     `gorm:"not null;default:800"`
-	Rotation          int     `gorm:"not null;default:0"`
-	Palette           string  `gorm:"not null;default:'7Standard'"`
-	DitherAlgorithm   string  `gorm:"not null;default:'StevenPigeon'"`
-	DitherStrength    float32 `gorm:"not null;default:1.0"`
-	ResizeMethod      string  `gorm:"not null;default:'cut'"`
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	Device            Device `gorm:"foreignKey:DeviceID;references:DeviceID"`
+	ID                uint      `gorm:"primarykey" json:"id"`
+	DeviceID          string    `gorm:"not null" json:"device_id"`
+	ImgUpdateInterval int       `gorm:"not null;default:600" json:"img_update_interval"`
+	Height            int       `gorm:"not null;default:480" json:"height"`
+	Width             int       `gorm:"not null;default:800" json:"width"`
+	Rotation          int       `gorm:"not null;default:0" json:"rotation"`
+	Palette           string    `gorm:"not null;default:'7Standard'" json:"palette"`
+	DitherAlgorithm   string    `gorm:"not null;default:'StevenPigeon'" json:"dither_algorithm"`
+	DitherStrength    float32   `gorm:"not null;default:1.0" json:"dither_strength"`
+	AutoBrightness    bool      `gorm:"not null;default:true" json:"auto_brightness"`
+	AutoContrast      bool      `gorm:"not null;default:true" json:"auto_contrast"`
+	ResizeMethod      string    `gorm:"not null;default:'cut'" json:"resize_method"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	Device            Device    `gorm:"foreignKey:DeviceID;references:DeviceID" json:"-"`
 }
 
 type DeviceTelemetry struct {
-	ID           uint      `gorm:"primarykey"`
-	DeviceID     string    `gorm:"uniqueIndex;not null"`
-	BatteryLevel int       `gorm:"not null;default:100"`
-	LastSeen     time.Time `gorm:"not null;default:CURRENT_TIMESTAMP"`
-	Device       Device    `gorm:"foreignKey:DeviceID;references:DeviceID"`
+	ID           uint      `gorm:"primarykey" json:"id"`
+	DeviceID     string    `gorm:"uniqueIndex;not null" json:"device_id"`
+	BatteryLevel int       `gorm:"not null;default:100" json:"battery_level"`
+	LastSeen     time.Time `gorm:"not null;default:CURRENT_TIMESTAMP" json:"last_seen"`
+	Device       Device    `gorm:"foreignKey:DeviceID;references:DeviceID" json:"-"`
 }
 
 // DeviceImage authorizes one generated asset for exactly one device.
@@ -68,18 +70,21 @@ type DBImage struct {
 }
 
 type DitheredImage struct {
-	ID              uint    `gorm:"primarykey"`
-	UUID            string  `gorm:"not null"`
-	DBImageUUID     string  `gorm:"not null"` // Foreign key to DBImage
-	Palette         string  `gorm:"not null"`
-	DitherAlgorithm string  `gorm:"not null"`
-	DitherStrength  float32 `gorm:"not null;default:1.0"`
-	Height          int     `gorm:"not null;default:480"`
-	Width           int     `gorm:"not null;default:800"`
-	ResizeMethod    string  `gorm:"not null;default:'cut'"`
-	Path            string  `gorm:"uniqueIndex;not null"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                uint    `gorm:"primarykey"`
+	UUID              string  `gorm:"not null"`
+	DBImageUUID       string  `gorm:"not null"` // Foreign key to DBImage
+	ProcessingVersion int     `gorm:"not null;default:1"`
+	Palette           string  `gorm:"not null"`
+	DitherAlgorithm   string  `gorm:"not null"`
+	DitherStrength    float32 `gorm:"not null;default:1.0"`
+	AutoBrightness    bool    `gorm:"not null;default:true"`
+	AutoContrast      bool    `gorm:"not null;default:true"`
+	Height            int     `gorm:"not null;default:480"`
+	Width             int     `gorm:"not null;default:800"`
+	ResizeMethod      string  `gorm:"not null;default:'cut'"`
+	Path              string  `gorm:"uniqueIndex;not null"`
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type RandomImage struct {

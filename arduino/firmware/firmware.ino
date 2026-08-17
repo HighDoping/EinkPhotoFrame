@@ -9,6 +9,7 @@
 #include <Preferences.h>
 #include "x509_crt_bundle.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"
 
 Preferences preferences;
@@ -21,6 +22,8 @@ const String SERVER_URL = "https://mac.home.arpa:8080"; // Replace with your ser
 const char *RESET_PASSWD = "password";             // Password to reset WiFi settings
 const char *CONFIG_NAME = "PhotoFrame";
 const char *TIME_SERVER = "10.0.0.1"; //NTP Server
+const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000;
+const uint64_t PROVISIONING_RETRY_DELAY_US = 120ULL * 1000000ULL;
 
 // --- Sleep Parameters ---
 #define uS_TO_S_FACTOR 1000000ULL // Conversion factor for micro seconds to seconds
@@ -40,6 +43,7 @@ const int BUSY_PIN = 9;
 const int SDO = 17; // NC
 
 String bearer_token = "";
+esp_timer_handle_t provisioningRetryTimer = nullptr;
 
 GxEPD2_7C<GxEPD2_730c_GDEY073D46, GxEPD2_730c_GDEY073D46::HEIGHT / 4> display(GxEPD2_730c_GDEY073D46(/*CS=5*/ CS, /*DC=*/DC, /*RST=*/RES, /*BUSY=*/BUSY_PIN)); // GDEY073D46 800x480 7-color, (N-FPC-001 2021.11.26)
 SPIClass hspi(HSPI);
@@ -47,7 +51,9 @@ SPIClass hspi(HSPI);
 bool updateImage();
 void drawFull(uint8_t *downloadedImages[]);
 void setClock();
-bool connectToWiFi();
+bool connectToSavedWiFi(const String &ssid, const String &password);
+void startProvisioningRetryTimer();
+void stopProvisioningRetryTimer();
 String getMacAddress();
 bool register_device();
 bool download_and_display(JsonArray images);
@@ -169,27 +175,7 @@ void connect_wifi()
   if (!savedSSID.isEmpty())
   {
     Serial.printf("Connecting to saved Wi-Fi: %s\n", savedSSID.c_str());
-    if (savedPassword.isEmpty())
-    {
-      WiFi.begin(savedSSID.c_str());
-    }
-    else
-    {
-      WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
-    }
-
-    unsigned long startTime = millis();
-    while (WiFi.status() != WL_CONNECTED)
-    {
-      if (millis() - startTime > 10000)
-      {
-        Serial.println("Failed to connect to saved Wi-Fi.");
-        break;
-      }
-      delay(500);
-    }
-
-    if (WiFi.status() == WL_CONNECTED)
+    if (connectToSavedWiFi(savedSSID, savedPassword))
     {
       Serial.printf("Successfully connected to %s\n", savedSSID.c_str());
       Serial.printf("IP: %s, gateway: %s, DNS: %s\n",
@@ -227,6 +213,7 @@ void connect_wifi()
         preferences.end(); })
       .onSuccess([](const char *ssid, const char *password, const char *input)
                  {
+        stopProvisioningRetryTimer();
         Serial.printf("Provisioning successful! SSID: %s\n", ssid);
         preferences.begin(CONFIG_NAME, false);
         // Store the credentials and API key in preferences
@@ -238,8 +225,74 @@ void connect_wifi()
         Serial.println("Credentials saved.");
         start_up(); });
 
+  // WiFiProvisioner does not expose AP client state and blocks while its
+  // captive portal is running. Give a user two minutes to configure it, then
+  // reboot so startup retries the saved network.
+  if (!savedSSID.isEmpty())
+  {
+    startProvisioningRetryTimer();
+  }
+
   Serial.println("Connecting to WiFi...");
   provisioner.startProvisioning();
+  stopProvisioningRetryTimer();
+}
+
+bool connectToSavedWiFi(const String &ssid, const String &password)
+{
+  if (password.isEmpty())
+  {
+    WiFi.begin(ssid.c_str());
+  }
+  else
+  {
+    WiFi.begin(ssid.c_str(), password.c_str());
+  }
+
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    if (millis() - startTime >= WIFI_CONNECT_TIMEOUT_MS)
+    {
+      Serial.println("Failed to connect to saved Wi-Fi.");
+      return false;
+    }
+    delay(500);
+  }
+  return true;
+}
+
+void startProvisioningRetryTimer()
+{
+  stopProvisioningRetryTimer();
+
+  esp_timer_create_args_t timerArgs = {};
+  timerArgs.callback = [](void *)
+  {
+    Serial.println("Provisioning timeout; restarting to retry saved Wi-Fi.");
+    Serial.flush();
+    ESP.restart();
+  };
+  timerArgs.name = "wifi_retry";
+
+  if (esp_timer_create(&timerArgs, &provisioningRetryTimer) != ESP_OK ||
+      esp_timer_start_once(provisioningRetryTimer,
+                           PROVISIONING_RETRY_DELAY_US) != ESP_OK)
+  {
+    Serial.println("Failed to schedule saved Wi-Fi retry.");
+    stopProvisioningRetryTimer();
+  }
+}
+
+void stopProvisioningRetryTimer()
+{
+  if (provisioningRetryTimer == nullptr)
+  {
+    return;
+  }
+  esp_timer_stop(provisioningRetryTimer);
+  esp_timer_delete(provisioningRetryTimer);
+  provisioningRetryTimer = nullptr;
 }
 
 void start_up()
